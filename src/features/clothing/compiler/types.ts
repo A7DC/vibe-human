@@ -17,6 +17,8 @@ export type CompilerResult<T> = {
 export type CompilerOptions = {
   quality: CompileQuality
   seamSamples?: number
+  /** Visual tessellation only; leaves the simulation and sewing unchanged. */
+  renderSubdivisions?: number
 }
 
 export type PanelDiscretization = {

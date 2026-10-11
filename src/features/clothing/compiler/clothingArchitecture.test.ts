@@ -12,6 +12,27 @@ import { validatePatternDocument } from './validatePatternDocument'
 import type { PatternDocument, PatternPanel } from '../document/types'
 
 describe('clothing compiler architecture', () => {
+  test('game visual density preserves the sewing simulation and valid embeddings', () => {
+    const document = buildDocument()
+    const dense = compileGarmentRuntime(document, { quality: 'medium' }).value
+    const game = compileGarmentRuntime(document, { quality: 'medium', renderSubdivisions: 12 }).value
+    assert.deepEqual(game.simMesh, dense.simMesh)
+    const count = (runtime: typeof dense) => runtime.renderPanels.reduce((sum, panel) => sum + panel.indices.length, 0)
+    assert.ok(count(game) < count(dense) / 4)
+    for (const panel of game.renderPanels) {
+      const vertices = panel.panelUvs.length / 2
+      assert.equal(panel.embedding.barycentrics.length, vertices * 3)
+      for (const index of panel.indices) assert.ok(index < vertices)
+      for (let i = 0; i < vertices; i++) {
+        const weights = panel.embedding.barycentrics.subarray(i * 3, i * 3 + 3)
+        assert.ok(weights.every(Number.isFinite))
+        assert.ok(Math.abs(weights[0] + weights[1] + weights[2] - 1) < 1e-5)
+        for (const index of panel.embedding.simTriangles.subarray(i * 3, i * 3 + 3)) assert.ok(index < game.simMesh.particleCount)
+      }
+    }
+    assert.throws(() => compileGarmentRuntime(document, { quality: 'low', renderSubdivisions: 0 }), RangeError)
+  })
+
   test('invalid seam references are rejected', () => {
     const document = buildDocument()
     const seam = Object.values(document.seams)[0]

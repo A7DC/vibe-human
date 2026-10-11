@@ -4,18 +4,20 @@ import type { PatternDocument, PatternPanel } from '../document/types'
 import type { RenderEmbedding, RenderPanelRuntime } from '../simulation/types'
 import type { GarmentTopology } from './types'
 
-const SUBDIVISIONS = 30
-
 export function buildRenderEmbedding(
   document: PatternDocument,
   topology: GarmentTopology,
+  subdivisions = 30,
 ) {
+  if (!Number.isInteger(subdivisions) || subdivisions < 1 || subdivisions > 64) {
+    throw new RangeError('Render subdivisions must be an integer between 1 and 64')
+  }
   const renderPanels: RenderPanelRuntime[] = []
 
   for (const panel of Object.values(document.panels)) {
     const info = topology.panelInfo[panel.id]
     if (!info || info.triangleIndices.length === 0) continue
-    const panelMesh = buildPanelVisualMesh(panel)
+    const panelMesh = buildPanelVisualMesh(panel, subdivisions)
     const embedding = embedPanelVertices(panelMesh.panelUvs, info.triangleIndices, topology.simMesh.panelUvs)
     renderPanels.push({
       panelId: panel.id,
@@ -28,7 +30,7 @@ export function buildRenderEmbedding(
   return { renderPanels }
 }
 
-function buildPanelVisualMesh(panel: PatternPanel) {
+function buildPanelVisualMesh(panel: PatternPanel, subdivisions: number) {
   const outline = samplePatternOutline(panel, 12)
   const flat: number[] = []
   const vertices: Array<{ x: number; y: number }> = []
@@ -58,25 +60,25 @@ function buildPanelVisualMesh(panel: PatternPanel) {
     const c = toUv(vertices[triIndices[triangle + 2]], bounds)
     const grid: number[][] = []
 
-    for (let i = 0; i <= SUBDIVISIONS; i += 1) {
+    for (let i = 0; i <= subdivisions; i += 1) {
       grid[i] = []
-      for (let j = 0; j <= SUBDIVISIONS - i; j += 1) {
-        const wa = 1 - (i + j) / SUBDIVISIONS
-        const wb = i / SUBDIVISIONS
-        const wc = j / SUBDIVISIONS
+      for (let j = 0; j <= subdivisions - i; j += 1) {
+        const wa = 1 - (i + j) / subdivisions
+        const wb = i / subdivisions
+        const wc = j / subdivisions
         const index = uvBuf.length / 2
         uvBuf.push(a.u * wa + b.u * wb + c.u * wc, a.v * wa + b.v * wb + c.v * wc)
         grid[i][j] = index
       }
     }
 
-    for (let i = 0; i < SUBDIVISIONS; i += 1) {
-      for (let j = 0; j < SUBDIVISIONS - i; j += 1) {
+    for (let i = 0; i < subdivisions; i += 1) {
+      for (let j = 0; j < subdivisions - i; j += 1) {
         const v0 = grid[i][j]
         const v1 = grid[i + 1][j]
         const v2 = grid[i][j + 1]
         indexBuf.push(v0, v1, v2)
-        if (j < SUBDIVISIONS - i - 1) indexBuf.push(v1, grid[i + 1][j + 1], v2)
+        if (j < subdivisions - i - 1) indexBuf.push(v1, grid[i + 1][j + 1], v2)
       }
     }
   }

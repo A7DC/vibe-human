@@ -7,7 +7,7 @@ import { validatePatternDocument } from './validatePatternDocument'
 export function compileGarmentRuntime(document: PatternDocument, options: CompilerOptions) {
   const issues = validatePatternDocument(document)
   const topology = compileGarmentTopology(document, options)
-  const embedding = buildRenderEmbedding(document, topology)
+  const embedding = buildRenderEmbedding(document, topology, options.renderSubdivisions)
   return {
     value: {
       document,
