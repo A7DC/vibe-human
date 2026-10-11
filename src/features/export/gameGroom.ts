@@ -106,7 +106,7 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
     const line = p.z > .075 ? 3.34 : p.z > -.035 ? 3.245 : 3.16
     return p.y > line && !(Math.abs(p.x) > .145 && p.y < 3.285 && p.z > -.025) && n.y > -.48
   })
-  const beard = faces.filter(({center:p,normal:n}) => p.y > 2.965 && p.y < 3.195 && p.z > .07
+  const beard = faces.filter(({center:p,normal:n}) => p.y > 2.995 + .15 * Math.abs(p.x) && p.y < 3.195 && p.z > .07
     && Math.abs(p.x) < .158 && n.z > .12
     && p.y < 3.035 + .85 * Math.abs(p.x)
     && !(p.y > 3.075 && p.y < 3.135 && Math.abs(p.x) < .072)
@@ -137,8 +137,38 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
   const meshes: THREE.SkinnedMesh[] = []
   const choices: Record<Style,string[]> = {shaved:[],crop:[],sidepart:[],stubble:[],beard:[]}
   const stats = {source:'upstream scalp guides → strandGeneration → hairCardBuilder; native-head skin/morph binding',meshes:0,triangles:0,guides:0,strands:0,cards:0}
-  const add = (geometry: THREE.BufferGeometry, name: string, style: Style, material: THREE.Material) => {
-    const mesh = bindFittedGarment(head,geometry,name,material)
+  const add = (geometry: THREE.BufferGeometry, name: string, style: Style, material: THREE.Material, sourceVertices?: number[]) => {
+    let mesh: THREE.SkinnedMesh
+    if(sourceVertices) {
+      // Facial hair is a source-surface overlay: preserve exact vertex identity.
+      // Decimation followed by nearest-point rebinding can switch jaw vertices
+      // to the neck, producing hanging tabs when the head/body morphs shrink.
+      const exact=geometry.clone()
+      const copy=(attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute) => {
+        const values:number[]=[]
+        for(const v of sourceVertices)for(let c=0;c<attribute.itemSize;c++)values.push(attribute.getComponent(v,c))
+        return new THREE.Float32BufferAttribute(values,attribute.itemSize)
+      }
+      const joints=copy(source.getAttribute('skinIndex'))
+      exact.setAttribute('skinIndex',new THREE.Uint16BufferAttribute(joints.array,4))
+      exact.setAttribute('skinWeight',copy(source.getAttribute('skinWeight')))
+      exact.morphTargetsRelative=source.morphTargetsRelative
+      for(const [attribute,targets] of Object.entries(source.morphAttributes)) {
+        exact.morphAttributes[attribute as keyof typeof exact.morphAttributes]=targets.map(target=>{
+          const result=copy(target)
+          if(attribute==='position'&&!source.morphTargetsRelative)for(let i=0;i<sourceVertices.length;i++) {
+            const v=sourceVertices[i]
+            result.setXYZ(i,result.getX(i)+geometry.attributes.position.getX(i)-position.getX(v),result.getY(i)+geometry.attributes.position.getY(i)-position.getY(v),result.getZ(i)+geometry.attributes.position.getZ(i)-position.getZ(v))
+          }
+          return result
+        })
+      }
+      mesh=new THREE.SkinnedMesh(exact,material);mesh.name=name
+      mesh.position.copy(head.position);mesh.quaternion.copy(head.quaternion);mesh.scale.copy(head.scale)
+      mesh.bindMode=head.bindMode;mesh.bind(head.skeleton,head.bindMatrix.clone());mesh.bindMatrixInverse.copy(head.bindMatrixInverse)
+      mesh.morphTargetDictionary={...head.morphTargetDictionary};mesh.morphTargetInfluences=head.morphTargetInfluences?.slice()
+      mesh.castShadow=true;mesh.receiveShadow=true
+    }else mesh = bindFittedGarment(head,geometry,name,material)
     mesh.visible = style === 'crop'
     mesh.userData.groomAuthoring = {source:'vibe-human groom pipeline',style,runtimeSimulation:false}
     meshes.push(mesh);choices[style].push(name)
@@ -156,7 +186,7 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
       const p = new THREE.Vector3().fromBufferAttribute(position,v), n = new THREE.Vector3().fromBufferAttribute(normal,v)
       const crown = THREE.MathUtils.smoothstep(p.y,3.31,3.47)
       const offset = style === 'shaved' ? .004 : style === 'crop' ? .024 + .019 * crown
-        : style === 'sidepart' ? .024 + .044 * crown : style === 'stubble' ? .014 : .020
+        : style === 'sidepart' ? .024 + .044 * crown : style === 'stubble' ? .0025 : .0045
       p.addScaledVector(n,offset)
       if(style==='sidepart') {
         // Lift and sweep the long side away from the left-hand part. Preserve
@@ -170,13 +200,14 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position',new THREE.Float32BufferAttribute(points,3))
     geometry.setAttribute('normal',new THREE.Float32BufferAttribute(normals,3));geometry.setIndex(indices)
-    const simplified=simplifySurface(geometry,style==='beard'||style==='stubble'?400:800)
+    const facial=style==='beard'||style==='stubble'
+    const simplified=facial?geometry:simplifySurface(geometry,800)
     if(style==='sidepart') {
       const vertices=simplified.getAttribute('position'),uv:number[]=[]
       for(let i=0;i<vertices.count;i++)uv.push((vertices.getX(i)+.24)/.48,(vertices.getZ(i)+.24)/.48)
       simplified.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2))
     }
-    add(simplified,`groom-${style}-base`,style,style==='stubble'?stubbleMaterial:style==='beard'?beardMaterial:style==='sidepart'?sidepartMaterial:shellMaterial)
+    add(simplified,`groom-${style}-base`,style,style==='stubble'?stubbleMaterial:style==='beard'?beardMaterial:style==='sidepart'?sidepartMaterial:shellMaterial,facial?vertices:undefined)
   }
   for (const style of ['crop','sidepart','stubble','beard'] as Style[]) {
     const selected = style === 'stubble' || style === 'beard' ? beard : scalp
