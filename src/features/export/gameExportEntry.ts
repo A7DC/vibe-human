@@ -6,6 +6,9 @@ import { buildGameGroom } from './gameGroom'
 import { createGameAnimations } from './gameAnimations'
 import { authorUpstreamDemo } from './gameUpstreamGarment'
 import { createAuthoredGarmentFabric } from './gameGarmentMaterials'
+import { authorUpstreamTrousers, createGameTrouserDocument } from './gameUpstreamTrousers'
+import { createAuthoredTrouserFabric } from './gameTrouserMaterials'
+import { authorUpstreamHood } from './gameUpstreamHood'
 
 async function build() {
   const base = import.meta.env.BASE_URL
@@ -17,6 +20,20 @@ async function build() {
   // Only the resulting rigged mesh is exported; simulation stays offline.
   const reports: Record<string, Record<string, unknown>> = {}
   const replaced = new Set<import('three/webgpu').BufferGeometry>()
+  const trousers = await authorUpstreamTrousers(prepared.root, prepared.body, prepared.head, { renderSubdivisions: 12 })
+  reports.trousers = trousers.report
+  const trouserFabric = createAuthoredTrouserFabric(trousers.geometry, createGameTrouserDocument())
+  for (const colour of ['navy', 'cream', 'wine']) clothing.manifestGarments[`trousers-${colour}`].meshes = [`trousers-${colour}`]
+  clothing.garments = clothing.garments.filter(mesh => {
+    if (mesh.name.startsWith('trousers-') && !/^trousers-(navy|cream|wine)$/.test(mesh.name)) { replaced.add(mesh.geometry); return false }
+    return true
+  })
+  for (const mesh of clothing.garments) if (mesh.name === 'starter-trousers' || /^trousers-(navy|cream|wine)$/.test(mesh.name)) {
+    replaced.add(mesh.geometry); mesh.geometry = trousers.geometry
+    mesh.userData.garmentAuthoring = { source: 'New four-panel PatternDocument through upstream compiler, sewing solver and render embedding', runtimeCloth: false }
+    const material = mesh.material as import('three/webgpu').MeshStandardMaterial
+    material.map = trouserFabric; material.vertexColors = false
+  }
   for (const variant of ['tshirt', 'hoodie', 'jacket'] as const) {
     const authored = await authorUpstreamDemo(prepared.root, prepared.body, prepared.head, {
       fitToTorso: true, liftSleeves: true, casualEase: true, variant,
@@ -29,7 +46,7 @@ async function build() {
       for (const colour of ['navy', 'cream', 'wine']) {
         const id = `${variant}-${colour}`
         // Closed jackets have no intersecting inner tee or floating lapels.
-        // The hoodie keeps its separately fitted folded hood.
+        // The hood is authored against this final torso below.
         clothing.manifestGarments[id].meshes = variant === 'hoodie' ? [id, `${id}-folded-hood`] : [id]
       }
       clothing.garments = clothing.garments.filter(mesh => {
@@ -42,10 +59,17 @@ async function build() {
     for (const mesh of clothing.garments) if ((variant === 'tshirt' && mesh.name === 'starter-tee') || new RegExp(`^${variant}-(navy|cream|wine)$`).test(mesh.name)) {
       replaced.add(mesh.geometry)
       mesh.geometry = authored.geometry
+      mesh.userData.garmentAuthoring = { source: 'Upstream demo pattern with authored fit and sleeve changes, original sewing solver and render embedding', runtimeCloth: false }
       const material = mesh.material as import('three/webgpu').MeshStandardMaterial
       material.vertexColors = false
       if (fabric) material.map = fabric
     }
+  }
+  const hood = await authorUpstreamHood(prepared.root, prepared.body, prepared.head, clothing.garments.find(mesh => mesh.name === 'hoodie-navy')!)
+  reports.hood = hood.report
+  for (const mesh of clothing.garments) if (/^hoodie-(navy|cream|wine)-folded-hood$/.test(mesh.name)) {
+    replaced.add(mesh.geometry); mesh.geometry = hood.geometry
+    mesh.userData.garmentAuthoring = { source: 'New two-panel PatternDocument through upstream sewing solver, attached to authored torso collar', runtimeCloth: false }
   }
   for (const geometry of replaced) geometry.dispose()
   prepared.body.parent!.add(...clothing.bodyRegions, ...clothing.garments)
@@ -67,7 +91,7 @@ async function build() {
     animations: Object.fromEntries(animations.map(clip => [clip.name, clip.name])),
   }
   const garmentTriangles = clothing.garments.reduce((sum, mesh) => sum + (mesh.geometry.index?.count ?? mesh.geometry.getAttribute('position').count) / 3, 0)
-  const result = { binary: Array.from(new Uint8Array(binary)), manifest, authoringReport: { ...reports.tshirt, additionalGarments: { hoodie: reports.hoodie, jacket: reports.jacket } }, metrics: { ...prepared.metrics, ...clothing.stats, garmentTriangles, groom: groom.stats, bytes: binary.byteLength } }
+  const result = { binary: Array.from(new Uint8Array(binary)), manifest, authoringReport: { ...reports.tshirt, additionalGarments: { hoodie: reports.hoodie, jacket: reports.jacket, trousers: reports.trousers, hood: reports.hood } }, metrics: { ...prepared.metrics, ...clothing.stats, garmentTriangles, groom: groom.stats, bytes: binary.byteLength } }
   Object.assign(window, { gameExport: result })
   document.querySelector('#status')!.textContent = JSON.stringify(result.metrics)
   for (const [label, filename, blob] of [

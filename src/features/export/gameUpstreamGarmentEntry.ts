@@ -3,6 +3,7 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { prepareGameCharacter, exportGameCharacter } from './exportGameCharacter'
 import { buildGameCatalogGarments } from './exportGameGarments'
 import { createAuthoredGarmentFabric } from './gameGarmentMaterials'
+import { authorUpstreamHood } from './gameUpstreamHood'
 import { authorUpstreamDemo } from './gameUpstreamGarment'
 import { buildGameGroom } from './gameGroom'
 import { createGameAnimations } from './gameAnimations'
@@ -29,6 +30,11 @@ async function build() {
     const material = mesh.material as import('three/webgpu').MeshStandardMaterial
     material.map = authoredMap
     material.vertexColors = false // Keep neutral cotton map; upstream panel UVs remain intact.
+  }
+  if (variant === 'hoodie' && new URLSearchParams(location.search).get('sewnHood') === '1') {
+    const hood = await authorUpstreamHood(prepared.root, prepared.body, prepared.head, clothing.garments.find(mesh => mesh.name === 'hoodie-navy')!)
+    for (const mesh of clothing.garments) if (/^hoodie-(navy|cream|wine)-folded-hood$/.test(mesh.name)) mesh.geometry = hood.geometry
+    Object.assign(candidate.report, { hood: hood.report })
   }
   prepared.body.parent!.add(...clothing.bodyRegions, ...clothing.garments)
   prepared.body.removeFromParent()

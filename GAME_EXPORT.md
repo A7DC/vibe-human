@@ -15,7 +15,7 @@ Open **http://127.0.0.1:5190/vibe-human/game-export.html**. This is a developmen
 the Draco decoder is served from `node_modules/three/examples/jsm/libs/draco/gltf/`.
 The page shows export metrics and **Download character** / **Download manifest** links when finished. It exposes the result as
 `window.gameExport` (`binary`, `manifest`, `metrics`), or an error as
-`window.gameExportError`. T-shirts, hoodies and jackets run through the original clothing compiler,
+`window.gameExportError`. T-shirts, hoodies, jackets and trousers run through the original clothing compiler,
 sewing solver and render embedding during this offline authoring step. It does not
 require opening the React character authoring UI. No cloth simulation runs in the
 game. The result also exposes `authoringReport`, including seam gaps, remaining
@@ -68,7 +68,13 @@ long sleeves use the existing gravity delay until seam assembly completes.
 The body/head use the original solid mesh collider while trousers use its
 two-sided surface-patch collider. The garment layer must not be merged into the
 solid body collider: that incorrectly traps the shirt hem on the trouser rim.
-Trousers, shoes, caps and the folded hood still use fitted authoring additions.
+Trousers use a new four-panel pattern authored in the same document system, with
+waist pins during fitting and separate leg weights in the exported rig. The
+folded hood uses two sewn panels; its attachment follows the final hoodie's
+actual collar positions, rig weights and corrective targets. These are new
+patterns authored with upstream's tools, not bundled upstream garment assets.
+Shoes and caps remain fitted authoring additions. All cloth simulation and pins
+are authoring-only; the playable game uses the resulting skinned meshes.
 Locomotion clips are newly authored against the source rig.
 
 ## Helper contracts
