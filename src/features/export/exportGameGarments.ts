@@ -78,7 +78,11 @@ function sliceGeometry(source: THREE.BufferGeometry, selected: [number, number, 
     if (!result.morphTargetsRelative) for (const morph of result.morphAttributes.position ?? []) morph.setXYZ(i, morph.getX(i) + dx, Math.max(.003, morph.getY(i) + dy), morph.getZ(i) + dz)
   }
   result.userData.boundaryVertices = [...new Set(boundaryVertices)]
-  result.computeVertexNormals()
+  result.userData.interiorStart = exteriorCount
+  result.userData.cuffThickness = cuffThickness
+  // Pure body partitions retain the full body smoothing and matching morph
+  // normals across mask borders. Only displaced or thickened pieces need new normals.
+  if (offset || cuffThickness || !normal) result.computeVertexNormals()
   result.computeBoundingBox(); result.computeBoundingSphere()
   return result
 }
@@ -429,8 +433,11 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
     // At the arm boundary keep every straddling triangle visible. Hiding a
     // triangle for only one covered vertex amputates the visible arm edge.
     // The cuff overlaps this conservative cut by ~0.15 native units.
-    const coveredTop = top(p) && (Math.abs(p.x) < .46 || triangle.every(i => Math.abs(position.getX(i)) < sleeveHalfWidth))
-    const region = coveredTop ? 'top' : shoes(p) ? 'shoes' : bottom(p) ? 'bottom' : p.y > 2.2 && p.y < 2.95 && Math.abs(p.x) < 1.36 ? 'sleeves' : 'exposed'
+    // Keep actual skin under both openings. Centroid-only masks cut away
+    // waist triangles that extend beyond a garment's animated hem/rim.
+    const coveredTop = top(p) && triangle.every(i => position.getY(i) >= 2.08) && (Math.abs(p.x) < .46 || triangle.every(i => Math.abs(position.getX(i)) < sleeveHalfWidth))
+    const coveredBottom = bottom(p) && triangle.every(i => position.getY(i) <= 1.96)
+    const region = coveredTop ? 'top' : shoes(p) ? 'shoes' : coveredBottom ? 'bottom' : p.y > 2.2 && p.y < 2.95 && Math.abs(p.x) < 1.36 ? 'sleeves' : 'exposed'
     masks[region].push(triangle)
     if (top(p)) garmentFaces.top.push(triangle)
     if (bottom(p)) garmentFaces.bottom.push(triangle)
@@ -530,7 +537,11 @@ function relaxGarmentSilhouette(mesh: THREE.SkinnedMesh, kind: 'tshirt' | 'coat'
     let x = oldX, y = oldY, z = oldZ
     if (kind === 'trousers') {
       if (y > 1.60) {
-        const rx = .365, rz = .255, cy = .025
+        // Follow the native hip-to-waist taper instead of extruding the hip
+        // ellipse into a tall, rigid waistband above a fitted shirt. Native
+        // neutral waist is about .294 wide; retain .025 cloth clearance.
+        const waist = THREE.MathUtils.smoothstep(y, 1.72, 1.985)
+        const rx = mix(.365, .32, waist), rz = mix(.255, .235, waist), cy = .025
         const radius = Math.hypot(x / rx, (z - cy) / rz)
         if (radius > .01) { const blend = THREE.MathUtils.smoothstep(y, 1.58, 1.72); x = mix(x, x / radius, blend); z = mix(z, cy + (z - cy) / radius, blend) }
       } else {
@@ -538,8 +549,17 @@ function relaxGarmentSilhouette(mesh: THREE.SkinnedMesh, kind: 'tshirt' | 'coat'
         const radius = Math.hypot((x - centreX) / rx, (z - .025) / rz)
         if (radius > .01) { x = centreX + (x - centreX) / radius; z = .025 + (z - .025) / radius }
       }
-      if (boundaries.has(i) && oldY > 1.93) y = 2.02
+      if (boundaries.has(i) && oldY > 1.93) y = 1.985
       if (boundaries.has(i) && oldY < .3) y = .22
+      // Ellipse fitting otherwise places the duplicated inner rim on the
+      // exterior, producing collapsed/inverted collision faces at the waist.
+      // Restore the authored inward thickness after fitting both surfaces.
+      if (i >= (geometry.userData.interiorStart ?? Infinity)) {
+        const centreX = y > 1.60 ? 0 : Math.sign(x || 1) * .205
+        const dx = x - centreX, dz = z - .025, radius = Math.hypot(dx, dz)
+        const thickness = Number(geometry.userData.cuffThickness ?? 0)
+        if (radius > thickness && thickness > 0) { x -= dx / radius * thickness; z -= dz / radius * thickness }
+      }
     } else {
       const hem = kind === 'tshirt' ? 1.94 : 1.91
       if (Math.abs(x) < .50 && y < 2.65) {
@@ -606,6 +626,12 @@ function relaxGarmentSilhouette(mesh: THREE.SkinnedMesh, kind: 'tshirt' | 'coat'
       if (kind !== 'trousers') morph.setY(i, mix(morph.getY(i), vertical + (geometry.morphTargetsRelative ? 0 : p.getY(i)), blend))
     }
   }
+  refreshGarmentNormals(geometry)
+}
+
+/** Rebuild base and corrective normals only after the final garment shape edit. */
+function refreshGarmentNormals(geometry: THREE.BufferGeometry) {
+  const p = geometry.getAttribute('position')
   geometry.computeVertexNormals()
   const baseNormal = geometry.getAttribute('normal')
   geometry.morphAttributes.normal = (geometry.morphAttributes.position ?? []).map(morph => {
@@ -685,7 +711,7 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
     // Ease the front rise: prevent the skin's anatomical contours reading through cloth.
     const tp = trouserMesh.geometry.getAttribute('position')
     for (let i = 0; i < tp.count; i++) if (tp.getY(i) > 1.62 && tp.getY(i) < 1.96 && Math.abs(tp.getX(i)) < .2 && tp.getZ(i) > .045) tp.setZ(i, Math.max(tp.getZ(i), .245))
-    trouserMesh.geometry.computeVertexNormals()
+    refreshGarmentNormals(trouserMesh.geometry)
     const trouserMeshes = [add(trouserMesh)]
     for (const sign of [-1, 1]) trouserMeshes.push(add(prop(body, `${trousers}-cargo-pocket-${sign}`, box([.028, .24, .19], [sign * .38, 1.40, .035]), shade.clone().multiplyScalar(.9))))
     result.manifestGarments[trousers] = { meshes: trouserMeshes, hides: ['body-covered-bottom'] }
