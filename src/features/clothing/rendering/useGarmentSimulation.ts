@@ -879,7 +879,7 @@ function buildAdjacency(vertexCount: number, indices: Uint32Array) {
   return { offsets, neighbors }
 }
 
-function smoothVisualMeshPositions(
+export function smoothVisualMeshPositions(
   positions: Float32Array,
   scratch: Float32Array,
   neighborOffsets: Uint32Array,
@@ -887,7 +887,8 @@ function smoothVisualMeshPositions(
   passes: number,
   alpha: number,
 ) {
-  if (passes <= 0 || alpha <= 0) return
+  // Negative alpha is the intentional anti-shrink pass after Laplacian smoothing.
+  if (!Number.isFinite(passes) || passes <= 0 || !Number.isFinite(alpha) || alpha === 0) return
   const vertexCount = neighborOffsets.length - 1
   for (let pass = 0; pass < passes; pass += 1) {
     scratch.set(positions)
@@ -916,3 +917,7 @@ function smoothVisualMeshPositions(
     }
   }
 }
+
+// Offline export uses the same initialization, embedding and visual smoothing
+// as the interactive clothing workspace; these helpers have no React lifecycle.
+export { SOLVER_PRESETS, applyDocumentPlacements, refreshSeamPlacementRest, createRenderPanelEntry, updateRenderPanels }
