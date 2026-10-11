@@ -134,15 +134,82 @@ export async function authorLayeredJacketOutfit(root: THREE.Object3D, body: THRE
   // hoodie retains its complete original geometry and garment binding.
   const innerHoodie=clothing.garments.find(mesh=>mesh.name==='hoodie-cream')!
   const jacketInner=innerHoodie.clone();jacketInner.name='jacket-inner-hoodie'
-  jacketInner.geometry=innerHoodie.geometry.clone()
-  const innerPositions=jacketInner.geometry.getAttribute('position'),innerIndex=jacketInner.geometry.index!,kept:number[]=[]
-  for(let i=0;i<innerIndex.count;i+=3){
-    const triangle=[innerIndex.getX(i),innerIndex.getX(i+1),innerIndex.getX(i+2)]
-    const x=triangle.reduce((sum,v)=>sum+innerPositions.getX(v),0)/3,y=triangle.reduce((sum,v)=>sum+innerPositions.getY(v),0)/3
-    if(!(Math.abs(x)>.32&&y>2.25))kept.push(...triangle)
-  }
-  jacketInner.geometry.setIndex(kept)
+  jacketInner.geometry=clipCoveredInnerHoodie(innerHoodie.geometry)
   clothing.garments.push(jacketInner)
   for(const colour of ['navy','cream','wine'])clothing.manifestGarments[`jacket-${colour}`].meshes=[`jacket-${colour}`,jacketInner.name,jacketHood.name]
   return { jacket: jacket.report, jacketHood: outsideHood.report }
+}
+
+/** Exact hidden cut boundaries replace centroid-based triangle deletion. The
+ * bounds were measured against the actual jacket and outside hood in native
+ * authoring space. Interpolate original UV/rig/correctives at every cut edge. */
+export function clipCoveredInnerHoodie(source: THREE.BufferGeometry) {
+  const position=source.getAttribute('position'),uv=source.getAttribute('uv'),index=source.index!
+  type Sample={ ids:number[]; weights:number[] }
+  const coordinate=(sample:Sample,axis:number)=>sample.ids.reduce((sum,id,i)=>sum+position.array[id*3+axis]*sample.weights[i],0)
+  const clip=(polygon:Sample[],axis:number,bound:number,greater:boolean,ySlope=0):Sample[]=>{
+    const output:Sample[]=[]
+    for(let i=0;i<polygon.length;i++){
+      const a=polygon[i],b=polygon[(i+1)%polygon.length],da=(coordinate(a,axis)-ySlope*coordinate(a,1)-bound)*(greater?1:-1),db=(coordinate(b,axis)-ySlope*coordinate(b,1)-bound)*(greater?1:-1)
+      if(da>=-1e-10)output.push(a)
+      if((da>1e-10&&db< -1e-10)||(da< -1e-10&&db>1e-10)){
+        const t=da/(da-db)
+        output.push({ids:a.ids,weights:a.weights.map((weight,c)=>weight*(1-t)+b.weights[c]*t)})
+      }
+    }
+    return output
+  }
+  const samples:Sample[]=[],indices:number[]=[],cache=new Map<string,number>()
+  const emit=(polygon:Sample[])=>{
+    if(polygon.length<3)return
+    const mapped=polygon.map(sample=>{
+      const key=sample.ids.map((id,i)=>[id,sample.weights[i]]).filter(pair=>pair[1]>1e-10).sort((a,b)=>a[0]-b[0]).map(([id,w])=>`${id}:${w.toFixed(10)}`).join('|')
+      const existing=cache.get(key);if(existing!==undefined)return existing
+      const id=samples.length;samples.push(sample);cache.set(key,id);return id
+    })
+    for(let i=1;i<mapped.length-1;i++)if(new Set([mapped[0],mapped[i],mapped[i+1]]).size===3)indices.push(mapped[0],mapped[i],mapped[i+1])
+  }
+  for(let i=0;i<index.count;i+=3){
+    const ids=[index.getX(i),index.getX(i+1),index.getX(i+2)],triangle=ids.map((_,n)=>({ids,weights:ids.map((_,c)=>c===n?1:0)}))
+    // Lower body is fully retained. Original front/back UV atlas identifies
+    // panel ownership without relying on folded surface normals.
+    emit(clip(triangle,1,2.25,false))
+    let upper=clip(triangle,1,2.25,true)
+    const front=ids.reduce((sum,id)=>sum+uv.getX(id),0)/3<.5
+    if(front){emit(clip(clip(upper,0,-.32,true),0,.32,false));continue}
+    // Posed slim-crouch exposes collar underlap down to native y2.829. Retain
+    // its full measured width above 2.80; taper the hidden back cut below it.
+    const collar=clip(upper,1,2.80,true)
+    emit(clip(clip(collar,0,-.34,true),0,.34,false))
+    const lower=clip(upper,1,2.70,false)
+    emit(clip(clip(lower,0,-.16,true),0,.16,false))
+    const transition=clip(clip(upper,1,2.70,true),1,2.80,false),slope=(.34-.16)/(.10),offset=.16-slope*2.70
+    emit(clip(clip(transition,0,-offset,true,-slope),0,offset,false,slope))
+  }
+  const geometry=new THREE.BufferGeometry();geometry.setIndex(indices)
+  for(const [name,attribute] of Object.entries(source.attributes)){
+    if(name==='skinIndex'||name==='skinWeight')continue
+    const values=new Float32Array(samples.length*attribute.itemSize)
+    samples.forEach((sample,i)=>{for(let c=0;c<attribute.itemSize;c++)values[i*attribute.itemSize+c]=sample.ids.reduce((sum,id,n)=>sum+attribute.array[id*attribute.itemSize+c]*sample.weights[n],0)})
+    geometry.setAttribute(name,new THREE.BufferAttribute(values,attribute.itemSize))
+  }
+  const skinIndex=new Uint16Array(samples.length*4),skinWeight=new Float32Array(samples.length*4),sourceIndices=source.getAttribute('skinIndex'),sourceWeights=source.getAttribute('skinWeight')
+  samples.forEach((sample,i)=>{
+    const influences=new Map<number,number>()
+    sample.ids.forEach((id,n)=>{for(let c=0;c<4;c++){const bone=sourceIndices.array[id*4+c];influences.set(bone,(influences.get(bone)??0)+sourceWeights.array[id*4+c]*sample.weights[n])}})
+    const strongest=[...influences].sort((a,b)=>b[1]-a[1]).slice(0,4),total=strongest.reduce((sum,pair)=>sum+pair[1],0)
+    if(total<=0)throw Error('Clipped inner garment has no skin influence')
+    strongest.forEach(([bone,weight],c)=>{skinIndex[i*4+c]=bone;skinWeight[i*4+c]=weight/total})
+  })
+  geometry.setAttribute('skinIndex',new THREE.BufferAttribute(skinIndex,4));geometry.setAttribute('skinWeight',new THREE.BufferAttribute(skinWeight,4))
+  geometry.morphTargetsRelative=source.morphTargetsRelative
+  for(const[name,targets]of Object.entries(source.morphAttributes))geometry.morphAttributes[name as 'position']=targets!.map(attribute=>{
+    const values=new Float32Array(samples.length*attribute.itemSize)
+    samples.forEach((sample,i)=>{for(let c=0;c<attribute.itemSize;c++)values[i*attribute.itemSize+c]=sample.ids.reduce((sum,id,n)=>sum+attribute.array[id*attribute.itemSize+c]*sample.weights[n],0)})
+    return new THREE.BufferAttribute(values,attribute.itemSize)
+  })
+  geometry.userData={...source.userData,coveredInnerBoundary:{frontHalfWidth:.32,backHalfWidth:.16,lowerY:2.25,collarHalfWidth:.34,collarStartY:2.80,taperStartY:2.70}}
+  delete geometry.userData.panelVertexRanges // clipped ranges no longer match compiler offsets
+  geometry.computeBoundingBox();geometry.computeBoundingSphere()
+  return geometry
 }
