@@ -15,7 +15,7 @@ Open **http://127.0.0.1:5190/vibe-human/game-export.html**. This is a developmen
 the Draco decoder is served from `node_modules/three/examples/jsm/libs/draco/gltf/`.
 The page shows export metrics and **Download character** / **Download manifest** links when finished. It exposes the result as
 `window.gameExport` (`binary`, `manifest`, `metrics`), or an error as
-`window.gameExportError`. T-shirts now run through the original clothing compiler,
+`window.gameExportError`. T-shirts, hoodies and jackets run through the original clothing compiler,
 sewing solver and render embedding during this offline authoring step. It does not
 require opening the React character authoring UI. No cloth simulation runs in the
 game. The result also exposes `authoringReport`, including seam gaps, remaining
@@ -59,12 +59,16 @@ Actual source assets are `public/human5.glb`,
 `public/textures/eyes.png`. The source human contains a 164-joint skeleton, separate
 body/head primitives and bone-attached eyes. It has no embedded animation clips.
 Hair variants use the existing scalp-guide, strand-generation and hair-card
-helpers. Starter and purchasable T-shirts use the upstream demo pattern with
+helpers. Starter and purchasable tops use the upstream demo pattern with
 editor-level sizing and placement adjustments, followed by the original
 `compileGarmentRuntime`, `XPBDClothSolver` and `useGarmentSimulation` render
 embedding helpers. The resulting drape receives skeleton weights and corrective
-targets before export. Other garments still use the earlier fitted adaptations;
-they have not all been migrated to this draping workflow.
+targets before export. Jacket/hoodie sleeves extend the same sewn pattern;
+long sleeves use the existing gravity delay until seam assembly completes.
+The body/head use the original solid mesh collider while trousers use its
+two-sided surface-patch collider. The garment layer must not be merged into the
+solid body collider: that incorrectly traps the shirt hem on the trouser rim.
+Trousers, shoes, caps and the folded hood still use fitted authoring additions.
 Locomotion clips are newly authored against the source rig.
 
 ## Helper contracts
