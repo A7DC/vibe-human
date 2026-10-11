@@ -24,7 +24,7 @@ async function build() {
       renderSubdivisions: 12,
     })
     reports[variant] = authored.report
-    const fabric = variant === 'tshirt' ? null : createAuthoredGarmentFabric(authored.geometry, variant)
+    const fabric = createAuthoredGarmentFabric(authored.geometry, variant)
     if (variant !== 'tshirt') {
       for (const colour of ['navy', 'cream', 'wine']) {
         const id = `${variant}-${colour}`
