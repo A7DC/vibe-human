@@ -99,7 +99,14 @@ function skinnedPart(body: THREE.SkinnedMesh, name: string, geometry: THREE.Buff
 /** Sew the actual upstream front/back T-shirt patterns into a clean low-poly volume. */
 function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.Material, kind: 'tshirt' | 'hoodie' | 'jacket' = 'tshirt'): THREE.SkinnedMesh {
   const document = createDemoGarment()
-  if (kind !== 'tshirt') for (const panel of Object.values(document.patterns)) {
+  // A straight sleeve opening avoids the demo flat-pattern's diagonal tips
+  // becoming hanging flaps when the native T-pose arms rotate down.
+  for (const panel of Object.values(document.patterns)) {
+    if (kind === 'tshirt') {
+      panel.points[`${panel.id}-right-sleeve-bottom`].x = 196
+      panel.points[`${panel.id}-left-sleeve-bottom`].x = -196
+      continue
+    }
     for (const [id, point] of Object.entries(panel.points)) {
       if (id.endsWith('right-sleeve-top') || id.endsWith('right-sleeve-bottom')) point.x = 347
       if (id.endsWith('left-sleeve-top') || id.endsWith('left-sleeve-bottom')) point.x = -347
@@ -138,9 +145,34 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
       const x = point.x * .00403, ax = Math.abs(x)
       let y = 2.90 - (point.y + 182) * ((kind === 'tshirt' ? .96 : .99) / 378)
       // A modest lifted shoulder seam clears the native shoulder without copying the deltoid bulge.
-      if (point.y < -120 && ax > .19) y += .025 * Math.sin(Math.min(1, (ax - .19) / .60) * Math.PI)
-      let depth = ax < .43 ? .275 * Math.sqrt(Math.max(.25, 1 - (ax / .46) ** 2)) : kind === 'tshirt' ? .145 : .175
-      if (point.y < -150 && ax < .23) depth = Math.sqrt(Math.max(.0064, .19 ** 2 - x ** 2))
+      const shoulderLift = 1 - THREE.MathUtils.smoothstep(point.y, -150, -96)
+      y += .025 * shoulderLift * Math.sin(THREE.MathUtils.clamp((ax - .19) / .60, 0, 1) * Math.PI)
+      const torsoDepth = .275 * Math.sqrt(Math.max(.25, 1 - (ax / .46) ** 2))
+      let depth = torsoDepth
+      if (ax > .35) {
+        // Round the sewn sleeve around its sampled top/bottom bounds; a
+        // constant-depth pair of panels produces an unwanted rectangular tube.
+        const crossing: number[] = []
+        for (let i = 0; i < boundary.length; i++) {
+          const a = boundary[i], b = boundary[(i + 1) % boundary.length]
+          if (point.x < Math.min(a.x, b.x) - .001 || point.x > Math.max(a.x, b.x) + .001) continue
+          if (Math.abs(a.x - b.x) < .001) { crossing.push(a.y, b.y); continue }
+          crossing.push(a.y + (b.y - a.y) * (point.x - a.x) / (b.x - a.x))
+        }
+        if (crossing.length > 1) {
+          const top = Math.min(...crossing), bottom = Math.max(...crossing), t = (point.y - (top + bottom) / 2) / Math.max(1, (bottom - top) / 2)
+          const taper = kind === 'tshirt' ? .15 : THREE.MathUtils.lerp(.18, .12, THREE.MathUtils.clamp((ax - .43) / .97, 0, 1))
+          const sleeveDepth = Math.max(.012, taper * Math.sqrt(Math.max(0, 1 - t * t)))
+          // Spread the armhole transition across several rows instead of folding
+          // the entire chest panel at one x coordinate.
+          depth = THREE.MathUtils.lerp(torsoDepth, sleeveDepth, THREE.MathUtils.smoothstep(ax, .35, .55))
+        }
+      }
+      // The neckline narrows over several pattern rows in both directions. A
+      // hard rectangular switch here creates a shelf across the posed chest.
+      const collarBlend = THREE.MathUtils.smoothstep(-point.y, 112, 164) * (1 - THREE.MathUtils.smoothstep(ax, .16, .31))
+      const collarDepth = Math.sqrt(Math.max(.0064, .19 ** 2 - x ** 2))
+      depth = THREE.MathUtils.lerp(depth, collarDepth, collarBlend)
       positions.push(x, y, .035 + (side === 0 ? depth : -depth))
       uv.push((point.x + 196) / 392, (196 - point.y) / 378)
     }
@@ -177,10 +209,66 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
   }
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geometry.setIndex(indices); geometry.computeVertexNormals()
-  const mesh = bindFittedGarment(body, geometry, name, material)
+  const mesh = bindFittedGarment(body, geometry, name, material, 8)
   geometry.dispose()
   mesh.userData.garmentAuthoring = { source: 'upstream createDemoGarment two-panel sewing pattern', seams: Object.keys(document.seams), runtimeCloth: false }
   return mesh
+}
+
+/** Clean authored trainer volumes; raw toe triangles/rims never enter footwear. */
+function buildCleanTrainers(body: THREE.SkinnedMesh, upperName: string, soleName: string, upperColour: THREE.ColorRepresentation, soleColour: THREE.ColorRepresentation): THREE.SkinnedMesh[] {
+  const source = body.geometry.getAttribute('position')
+  const feet = [-1, 1].map(sign => {
+    const indices: number[] = [], bounds = new THREE.Box3()
+    for (let i = 0; i < source.count; i++) if (source.getY(i) < .23 && Math.sign(source.getX(i)) === sign) { indices.push(i); bounds.expandByPoint(new THREE.Vector3(source.getX(i), source.getY(i), source.getZ(i))) }
+    const bone = body.skeleton.bones.findIndex(bone => bone.name === THREE.PropertyBinding.sanitizeNodeName(`DEF-foot.${sign > 0 ? 'L' : 'R'}`) || bone.name === `DEF-foot.${sign > 0 ? 'L' : 'R'}`)
+    if (bone < 0 || !indices.length) throw new Error('Approved foot bones/vertices missing')
+    return { sign, indices, bounds, bone }
+  })
+  return [false, true].map(sole => {
+    const positions: number[] = [], indices: number[] = [], weights: number[] = [], joints: number[] = [], owner: number[] = []
+    const sides = 16
+    feet.forEach((foot, f) => {
+      const centre = foot.bounds.getCenter(new THREE.Vector3()), size = foot.bounds.getSize(new THREE.Vector3())
+      const halfX = size.x / 2 + .022, halfZ = size.z / 2 + .038, centreZ = centre.z + .014
+      const start = positions.length / 3
+      const rings = sole ? [{ y: .008, x: 1, z: 1, cz: centreZ }, { y: .067, x: 1, z: 1, cz: centreZ }]
+        : [{ y: .062, x: .98, z: .985, cz: centreZ }, { y: .142, x: .92, z: .91, cz: centreZ - .01 }, { y: .245, x: .69, z: .31, cz: foot.bounds.min.z + size.z * .31 }]
+      for (const ring of rings) for (let j = 0; j < sides; j++) {
+        const angle = j / sides * Math.PI * 2, x = Math.cos(angle), z = Math.sin(angle)
+        positions.push(centre.x + Math.sign(x) * Math.sqrt(Math.abs(x)) * halfX * ring.x, ring.y, ring.cz + Math.sign(z) * Math.sqrt(Math.abs(z)) * halfZ * ring.z)
+        joints.push(foot.bone, 0, 0, 0); weights.push(1, 0, 0, 0); owner.push(f)
+      }
+      for (let ring = 0; ring < rings.length - 1; ring++) for (let j = 0; j < sides; j++) {
+        const a = start + ring * sides + j, b = start + ring * sides + (j + 1) % sides, c = a + sides, d = b + sides
+        indices.push(a, c, b, b, c, d)
+      }
+      if (sole) for (let j = 1; j < sides - 1; j++) { indices.push(start, start + j, start + j + 1); indices.push(start + sides, start + sides + j + 1, start + sides + j) }
+    })
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(joints, 4)); geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(weights, 4)); geometry.setIndex(indices)
+    geometry.morphTargetsRelative = true
+    geometry.morphAttributes.position = (body.geometry.morphAttributes.position ?? []).map(morph => {
+      const targetBounds = feet.map(foot => {
+        const bounds = new THREE.Box3()
+        for (const i of foot.indices) bounds.expandByPoint(new THREE.Vector3(morph.getX(i) + (body.geometry.morphTargetsRelative ? source.getX(i) : 0), morph.getY(i) + (body.geometry.morphTargetsRelative ? source.getY(i) : 0), morph.getZ(i) + (body.geometry.morphTargetsRelative ? source.getZ(i) : 0)))
+        return bounds
+      })
+      const delta = new Float32Array(positions.length)
+      owner.forEach((footIndex, i) => {
+        const foot = feet[footIndex], baseSize = foot.bounds.getSize(new THREE.Vector3()), targetSize = targetBounds[footIndex].getSize(new THREE.Vector3())
+        const baseCentre = foot.bounds.getCenter(new THREE.Vector3()), targetCentre = targetBounds[footIndex].getCenter(new THREE.Vector3())
+        for (let c = 0; c < 3; c++) {
+          const ratio = targetSize.getComponent(c) / Math.max(.001, baseSize.getComponent(c))
+          delta[i * 3 + c] = targetCentre.getComponent(c) + (positions[i * 3 + c] - baseCentre.getComponent(c)) * ratio - positions[i * 3 + c]
+        }
+      })
+      return new THREE.BufferAttribute(delta, 3)
+    })
+    geometry.computeVertexNormals(); geometry.computeBoundingBox(); geometry.computeBoundingSphere()
+    const name = sole ? soleName : upperName, mat = new THREE.MeshStandardMaterial({ color: sole ? soleColour : upperColour, roughness: .98, side: THREE.DoubleSide }); mat.name = name
+    const mesh = skinnedPart(body, name, geometry, mat); mesh.userData.garmentAuthoring = { source: 'clean foot-bound trainer volume', weightedTo: 'approved DEF-foot.L/R', runtimeCloth: false }; return mesh
+  })
 }
 
 /**
@@ -199,7 +287,9 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
   const template = createDemoGarment(), panel = template.patterns['torso-front']
   // Preserve the upstream shoulder:sleeve proportion; fit it to this body's torso width.
   const sleeveRatio = Math.abs(panel.points['torso-front-right-sleeve-top'].x / panel.points['torso-front-right-shoulder'].x)
-  const sleeveHalfWidth = .37 * sleeveRatio
+  // Leave a real arm underlap below the cloth cuff. Coverage must end
+  // before the sewn opening, especially when upper-arm twist bones move.
+  const sleeveHalfWidth = .31 * sleeveRatio
   const all = triangles(geometry)
   const centroid = (triangle: [number, number, number]) => ({
     x: triangle.reduce((n, i) => n + position.getX(i), 0) / 3,
@@ -208,14 +298,18 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
   })
   // Sewn neckline is higher at the back: do not leave broad old shell cutouts
   // visible through the new collar. The true neck above the opening stays visible.
-  const top = (p: { x: number; y: number; z: number }) => p.y >= 1.94 && p.y <= 2.93 && Math.abs(p.x) <= sleeveHalfWidth && !(p.y > (p.z > .035 ? 2.845 : 2.875) && Math.abs(p.x) < .18)
+  const top = (p: { x: number; y: number; z: number }) => p.y >= 1.94 && p.y <= 2.93 && Math.abs(p.x) <= sleeveHalfWidth && !(p.y > (p.z > .035 ? 2.87 : 2.89) && Math.abs(p.x) < .145)
   const bottom = (p: { x: number; y: number }) => p.y >= .19 && p.y <= 2.02 && Math.abs(p.x) < .7
   const shoes = (p: { x: number; y: number }) => p.y < .25
   const masks: Record<string, [number, number, number][]> = { exposed: [], top: [], bottom: [], shoes: [], sleeves: [] }
   const garmentFaces: Record<string, [number, number, number][]> = { top: [], bottom: [], shoes: [], soles: [] }
   for (const triangle of all) {
     const p = centroid(triangle)
-    const region = top(p) ? 'top' : shoes(p) ? 'shoes' : bottom(p) ? 'bottom' : p.y > 2.2 && p.y < 2.95 && Math.abs(p.x) < 1.36 ? 'sleeves' : 'exposed'
+    // At the arm boundary keep every straddling triangle visible. Hiding a
+    // triangle for only one covered vertex amputates the visible arm edge.
+    // The cuff overlaps this conservative cut by ~0.15 native units.
+    const coveredTop = top(p) && (Math.abs(p.x) < .46 || triangle.every(i => Math.abs(position.getX(i)) < sleeveHalfWidth))
+    const region = coveredTop ? 'top' : shoes(p) ? 'shoes' : bottom(p) ? 'bottom' : p.y > 2.2 && p.y < 2.95 && Math.abs(p.x) < 1.36 ? 'sleeves' : 'exposed'
     masks[region].push(triangle)
     if (top(p)) garmentFaces.top.push(triangle)
     if (bottom(p)) garmentFaces.bottom.push(triangle)
@@ -230,8 +324,6 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
   const specs = [
     { name: 'starter-tee', region: 'top', offset: .055, colour: 0x8b8d88 },
     { name: 'starter-trousers', region: 'bottom', offset: .045, colour: 0x343b44 },
-    { name: 'starter-trainers', region: 'shoes', offset: .055, colour: 0xb6b5a9 },
-    { name: 'starter-trainer-soles', region: 'soles', offset: .068, colour: 0x343633 },
   ]
   const garments = specs.map(spec => {
     if (!garmentFaces[spec.region].length) throw new Error(`Empty authored garment region: ${spec.region}`)
@@ -241,6 +333,7 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
     mesh.userData.garmentAuthoring = { source: 'approved human5 body topology', template: spec.region === 'top' ? `${template.name}: sampled panels, triangulation and eight seams` : 'new fitted body-region shell', runtimeCloth: false }
     return mesh
   })
+  garments.push(...buildCleanTrainers(body, 'starter-trainers', 'starter-trainer-soles', 0xb6b5a9, 0x343633))
   return {
     garments, bodyRegions,
     manifestGarments: {
@@ -257,25 +350,48 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
  * corrective deltas offline. Caller supplies an already fitted garment geometry.
  * Nearest-vertex transfer is a first bind, requiring visual pose/extreme review.
  */
-export function bindFittedGarment(body: THREE.SkinnedMesh, fittedGeometry: THREE.BufferGeometry, name: string, material: THREE.Material): THREE.SkinnedMesh {
+export function bindFittedGarment(body: THREE.SkinnedMesh, fittedGeometry: THREE.BufferGeometry, name: string, material: THREE.Material, sampleCount = 1): THREE.SkinnedMesh {
   const source = body.geometry.getAttribute('position'), fitted = fittedGeometry.getAttribute('position')
   if (!source || !fitted || !body.geometry.getAttribute('skinWeight')) throw new Error('Weight transfer requires fitted geometry and a skinned source')
-  const nearest: number[] = []
+  const nearest: number[] = [], neighbourhoods: { index: number; weight: number }[][] = []
   for (let i = 0; i < fitted.count; i++) {
     let winner = 0, distance = Infinity
+    const samples: { index: number; distance: number }[] = []
     for (let j = 0; j < source.count; j++) {
       const d = (fitted.getX(i) - source.getX(j)) ** 2 + (fitted.getY(i) - source.getY(j)) ** 2 + (fitted.getZ(i) - source.getZ(j)) ** 2
       if (d < distance) { winner = j; distance = d }
+      if (sampleCount > 1 && (samples.length < sampleCount || d < samples[samples.length - 1].distance)) {
+        samples.push({ index: j, distance: d }); samples.sort((a, b) => a.distance - b.distance)
+        if (samples.length > sampleCount) samples.pop()
+      }
     }
     nearest.push(winner)
+    const sum = samples.reduce((total, sample) => total + 1 / (.0025 + sample.distance), 0)
+    neighbourhoods.push(sampleCount === 1 ? [{ index: winner, weight: 1 }] : samples.map(sample => ({ index: sample.index, weight: 1 / (.0025 + sample.distance) / sum })))
   }
   const geometry = fittedGeometry.clone()
   for (const attribute of ['skinIndex', 'skinWeight']) geometry.setAttribute(attribute, copyAttribute(body.geometry.getAttribute(attribute), nearest))
+  if (sampleCount > 1) {
+    // Smooth actual source weights across the cuff; nearest-vertex switching
+    // can attach adjacent cloth vertices to different arm/twist bones.
+    const sourceJoints = body.geometry.getAttribute('skinIndex'), sourceWeights = body.geometry.getAttribute('skinWeight')
+    const joints = new Uint16Array(fitted.count * 4), weights = new Float32Array(fitted.count * 4)
+    neighbourhoods.forEach((samples, i) => {
+      const combined = new Map<number, number>()
+      for (const sample of samples) for (let c = 0; c < 4; c++) {
+        const joint = component(sourceJoints, sample.index, c)
+        combined.set(joint, (combined.get(joint) ?? 0) + component(sourceWeights, sample.index, c) * sample.weight)
+      }
+      const strongest = [...combined].sort((a, b) => b[1] - a[1]).slice(0, 4), total = strongest.reduce((sum, entry) => sum + entry[1], 0)
+      strongest.forEach(([joint, weight], c) => { joints[i * 4 + c] = joint; weights[i * 4 + c] = weight / total })
+    })
+    geometry.setAttribute('skinIndex', new THREE.BufferAttribute(joints, 4)); geometry.setAttribute('skinWeight', new THREE.BufferAttribute(weights, 4))
+  }
   geometry.morphTargetsRelative = true
   geometry.morphAttributes.position = (body.geometry.morphAttributes.position ?? []).map(morph => {
     const values = new Float32Array(fitted.count * 3)
-    nearest.forEach((j, i) => {
-      for (let c = 0; c < 3; c++) values[i * 3 + c] = component(morph, j, c) - (body.geometry.morphTargetsRelative ? 0 : component(source, j, c))
+    neighbourhoods.forEach((samples, i) => {
+      for (const sample of samples) for (let c = 0; c < 3; c++) values[i * 3 + c] += sample.weight * (component(morph, sample.index, c) - (body.geometry.morphTargetsRelative ? 0 : component(source, sample.index, c)))
     })
     return new THREE.BufferAttribute(values, 3)
   })
@@ -309,7 +425,7 @@ function relaxGarmentSilhouette(mesh: THREE.SkinnedMesh, kind: 'tshirt' | 'coat'
         const rx = mix(kind === 'coat' ? .435 : .40, kind === 'coat' ? .455 : .42, THREE.MathUtils.smoothstep(y, hem, 2.55))
         const rz = kind === 'coat' ? .32 : .285, cz = .035
         const radius = Math.hypot(x / rx, (z - cz) / rz)
-        if (radius > .01) { const blend = 1 - THREE.MathUtils.smoothstep(y, 2.50, 2.65); x = mix(x, x / radius, blend); z = mix(z, cz + (z - cz) / radius, blend) }
+        if (radius > .01) { const blend = (1 - THREE.MathUtils.smoothstep(y, 2.50, 2.65)) * (1 - THREE.MathUtils.smoothstep(Math.abs(x), .36, .50)); x = mix(x, x / radius, blend); z = mix(z, cz + (z - cz) / radius, blend) }
       }
       if (boundaries.has(i) && oldY < hem + .11) y = hem
       const sleeve = kind === 'tshirt' ? .755 : 1.43
@@ -373,8 +489,6 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
   }
   const select = (source: THREE.BufferGeometry, predicate: (p: THREE.Vector3) => boolean) => triangles(source).filter(triangle => predicate(centre(source, triangle)))
   const trouserFaces = select(body.geometry, p => p.y >= .19 && p.y < 2.02 && Math.abs(p.x) < .7)
-  const shoeFaces = select(body.geometry, p => p.y < .25)
-  const soleFaces = select(body.geometry, p => p.y < .085)
   const capFaces = select(head.geometry, p => p.y > 3.27)
   const capBandFaces = select(head.geometry, p => p.y > 3.27 && p.y < 3.32)
   const template = (id: string) => result.garments.find(mesh => mesh.name === id)!
@@ -414,7 +528,7 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
     const hoodieMesh = buildPatternTop(body, hoodie, material(hoodie, shade), 'hoodie'); relaxGarmentSilhouette(hoodieMesh, 'coat')
     const hoodMeshes = [add(hoodieMesh),
       add(prop(body, `${hoodie}-folded-hood`, hoodGeometry, shade)),
-      add(prop(body, `${hoodie}-pouch`, box([.34, .18, .055], [0, 2.14, .375]), light))]
+      add(prop(body, `${hoodie}-pouch`, box([.34, .18, .018], [0, 2.14, .365]), shade.clone().multiplyScalar(.9)))]
     // A dark ribbed waistband is a separate surface, not merely a colour on the body.
     const ribFaces = select(body.geometry, p => p.y > 1.91 && p.y < 2.03 && Math.abs(p.x) < .7)
     hoodMeshes.push(add(shell(body, `${hoodie}-waistband`, ribFaces, .10, dark)))
@@ -437,14 +551,20 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
     for (let i = 0; i < tp.count; i++) if (tp.getY(i) > 1.62 && tp.getY(i) < 1.96 && Math.abs(tp.getX(i)) < .2 && tp.getZ(i) > .045) tp.setZ(i, Math.max(tp.getZ(i), .245))
     trouserMesh.geometry.computeVertexNormals()
     const trouserMeshes = [add(trouserMesh)]
-    for (const sign of [-1, 1]) trouserMeshes.push(add(prop(body, `${trousers}-cargo-pocket-${sign}`, box([.09, .24, .19], [sign * .35, 1.40, .035]), light)))
+    for (const sign of [-1, 1]) trouserMeshes.push(add(prop(body, `${trousers}-cargo-pocket-${sign}`, box([.028, .24, .19], [sign * .38, 1.40, .035]), shade.clone().multiplyScalar(.9))))
     result.manifestGarments[trousers] = { meshes: trouserMeshes, hides: ['body-covered-bottom'] }
 
     const trainers = `trainers-${variant.id}`
-    const trainerMeshes = [add(shell(body, trainers, shoeFaces, .065, shade)), add(shell(body, `${trainers}-soles`, soleFaces, .084, 0xc9c7b9))]
+    const trainerMeshes = buildCleanTrainers(body, trainers, `${trainers}-soles`, shade, 0xc9c7b9).map(add)
     footBounds.forEach((bounds, side) => {
       const size = bounds.getSize(new THREE.Vector3()), centre = bounds.getCenter(new THREE.Vector3())
-      for (let lace = 0; lace < 3; lace++) trainerMeshes.push(add(prop(body, `${trainers}-lace-${side}-${lace}`, box([size.x * .58, .018, .022], [centre.x, .185, centre.z + lace * .045]), 0xe4dfd1)))
+      for (let lace = 0; lace < 3; lace++) {
+        const mesh = prop(body, `${trainers}-lace-${side}-${lace}`, box([size.x * .58, .014, .018], [centre.x, .175, centre.z + lace * .04]), 0xe4dfd1)
+        const bone = body.skeleton.bones.findIndex(bone => bone.name === THREE.PropertyBinding.sanitizeNodeName(`DEF-foot.${centre.x > 0 ? 'L' : 'R'}`) || bone.name === `DEF-foot.${centre.x > 0 ? 'L' : 'R'}`)
+        const joints = mesh.geometry.getAttribute('skinIndex'), weights = mesh.geometry.getAttribute('skinWeight')
+        for (let i = 0; i < joints.count; i++) { joints.setXYZW(i, bone, 0, 0, 0); weights.setXYZW(i, 1, 0, 0, 0) }
+        trainerMeshes.push(add(mesh))
+      }
     })
     result.manifestGarments[trainers] = { meshes: trainerMeshes, hides: ['body-covered-shoes'] }
 
