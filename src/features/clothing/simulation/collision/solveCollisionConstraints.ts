@@ -400,7 +400,12 @@ function pushOutOfMeshCollider(
       }
     }
 
-    if (bestDistSq !== Infinity) {
+    // Broad-phase cells/leaves can include distant triangles. Their backside
+    // alone does not establish penetration (especially near concave surfaces).
+    // Discrete contact is local to the skin band; deeper crossings use the
+    // swept path below. Deep stationary initial overlap needs separate global
+    // inside/nearest-surface recovery, not an arbitrary broad-phase candidate.
+    if (bestDistSq < target * target) {
       const dx = px - bestX
       const dy = py - bestY
       const dz = pz - bestZ
@@ -442,11 +447,10 @@ function pushOutOfMeshCollider(
   return pushOutOfSweptMeshCollider(collider, target, prevX, prevY, prevZ, px, py, pz, out)
 }
 
-// BVH-accelerated equivalent of pushOutOfMeshCollider. Same narrow phase and
-// signed push-out as the grid path; only the broad phase differs. The BVH prunes
-// to a tight candidate set, so we test every candidate (no visit-order-dependent
-// centroid cull) and pick the true-closest triangle — at least as accurate as
-// the grid, and with far fewer tests.
+// BVH-accelerated equivalent of pushOutOfMeshCollider. Leaf AABB overlap is
+// only a broad-phase test: exact triangle distance must still satisfy the
+// contact band. A closest candidate outside that band is not necessarily the
+// globally closest surface and cannot establish deep penetration.
 function pushOutOfMeshColliderBVH(
   collider: MeshSurfaceColliderSnapshot,
   target: number,
@@ -505,7 +509,12 @@ function pushOutOfMeshColliderBVH(
       }
     }
 
-    if (bestDistSq !== Infinity) {
+    // Broad-phase cells/leaves can include distant triangles. Their backside
+    // alone does not establish penetration (especially near concave surfaces).
+    // Discrete contact is local to the skin band; deeper crossings use the
+    // swept path below. Deep stationary initial overlap needs separate global
+    // inside/nearest-surface recovery, not an arbitrary broad-phase candidate.
+    if (bestDistSq < target * target) {
       const dx = px - bestX
       const dy = py - bestY
       const dz = pz - bestZ
