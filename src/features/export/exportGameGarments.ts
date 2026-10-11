@@ -112,7 +112,7 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
       if (id.endsWith('left-sleeve-top') || id.endsWith('left-sleeve-bottom')) point.x = -347
     }
   }
-  const positions: number[] = [], uv: number[] = [], indices: number[] = []
+  const positions: number[] = [], uv: number[] = [], indices: number[] = [], colours: number[] = []
   const panelData: { start: number; edges: Record<string, number[]>; boundaryCount: number }[] = []
   const panels = [document.patterns['torso-front'], document.patterns['torso-back']]
   const inside = (x: number, y: number, polygon: { x: number; y: number }[]) => {
@@ -175,6 +175,25 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
       depth = THREE.MathUtils.lerp(depth, collarDepth, collarBlend)
       positions.push(x, y, .035 + (side === 0 ? depth : -depth))
       uv.push((point.x + 196) / 392, (196 - point.y) / 378)
+      if (kind === 'tshirt') {
+        // Use the actual sewn pattern edges for restrained rib/turned-hem tint.
+        // Vertex shading adds no extra surface, so the tested fit stays exact.
+        let edgeShade = 1
+        for (const edgeId of ['neck', 'hem', 'left-sleeve-opening', 'right-sleeve-opening']) {
+          const edge = edges[edgeId]
+          let distance = Infinity
+          for (let j = 1; j < edge.length; j++) {
+            const a = boundary[edge[j - 1]], b = boundary[edge[j]]
+            const dx = b.x - a.x, dy = b.y - a.y
+            const t = THREE.MathUtils.clamp(((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy || 1), 0, 1)
+            distance = Math.min(distance, Math.hypot(point.x - a.x - t * dx, point.y - a.y - t * dy))
+          }
+          const width = edgeId === 'neck' ? 7 : 5
+          const strength = edgeId === 'neck' ? .13 : .08
+          edgeShade = Math.min(edgeShade, 1 - strength * (1 - THREE.MathUtils.smoothstep(distance, 0, width)))
+        }
+        colours.push(edgeShade, edgeShade, edgeShade)
+      }
     }
     for (let i = 0; i < surface.triangles.length; i += 3) {
       const [a, b, c] = surface.triangles.slice(i, i + 3).map(index => index + start)
@@ -199,6 +218,7 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
       // through the trouser waistband. This keeps the entire side outside it.
       positions.push(x + Math.sign(x) * .06, (positions[a * 3 + 1] + positions[b * 3 + 1]) / 2, .035)
       uv.push((uv[a * 2] + uv[b * 2]) / 2, (uv[a * 2 + 1] + uv[b * 2 + 1]) / 2)
+      if (kind === 'tshirt') for (let c = 0; c < 3; c++) colours.push((colours[a * 3 + c] + colours[b * 3 + c]) / 2)
     }
     for (let i = 0; i < front.length - 1; i++) {
       const a = panelData[0].start + front[i], b = panelData[0].start + front[i + 1]
@@ -209,6 +229,23 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
   }
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geometry.setIndex(indices); geometry.computeVertexNormals()
+  if (kind === 'tshirt') {
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3))
+    const cotton = material as THREE.MeshStandardMaterial
+    cotton.vertexColors = true
+    const pixels = new Uint8Array(64 * 64 * 4)
+    for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) {
+      const i = (y * 64 + x) * 4
+      // Deterministic, low-contrast cotton weave; neutral RGB preserves variants.
+      const tone = 251 + ((x + (y % 2)) % 3 === 0 ? 2 : 0) - (y % 4 === 0 ? 2 : 0)
+      pixels[i] = pixels[i + 1] = pixels[i + 2] = tone; pixels[i + 3] = 255
+    }
+    const weave = new THREE.DataTexture(pixels, 64, 64, THREE.RGBAFormat)
+    weave.name = 'tee-cotton-weave'; weave.colorSpace = THREE.SRGBColorSpace
+    weave.magFilter = THREE.LinearFilter; weave.minFilter = THREE.LinearMipmapLinearFilter
+    weave.generateMipmaps = true; weave.needsUpdate = true
+    cotton.map = weave
+  }
   const mesh = bindFittedGarment(body, geometry, name, material, 8)
   // A sewn sleeve is one cross-section. Front chest skin can be almost entirely
   // breast-weighted while its matching rear vertex follows the upper-arm bone;
@@ -589,7 +626,9 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
   for (const variant of variants) {
     const shade = new THREE.Color(variant.colour), dark = shade.clone().multiplyScalar(.6), light = shade.clone().lerp(new THREE.Color(0xe5dfce), .24)
     const tshirt = `tshirt-${variant.id}`
-    add(skinnedPart(body, tshirt, template('starter-tee').geometry.clone(), material(tshirt, shade)))
+    const teeMaterial = (template('starter-tee').material as THREE.MeshStandardMaterial).clone()
+    teeMaterial.name = tshirt; teeMaterial.color.copy(shade)
+    add(skinnedPart(body, tshirt, template('starter-tee').geometry.clone(), teeMaterial))
     result.manifestGarments[tshirt] = { meshes: [tshirt], hides: ['body-covered-top'] }
 
     const hoodie = `hoodie-${variant.id}`
