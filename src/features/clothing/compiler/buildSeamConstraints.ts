@@ -1,6 +1,6 @@
 import type { PatternDocument, PatternPanel } from '../document/types'
 import type { DistanceConstraint } from '../simulation/types'
-import type { CompiledPanelSimMesh } from './buildPanelSimMesh'
+import { samplePanelEdge, type CompiledPanelSimMesh } from './buildPanelSimMesh'
 import { resolveSeamSamples, placePt } from '../geometry/seamUtils'
 import type { Vec2 } from '../state/clothingTypes'
 
@@ -10,6 +10,7 @@ export function buildSeamConstraints(
   seamSamples: number,
 ): DistanceConstraint[] {
   const constraints: DistanceConstraint[] = []
+  const boundaries = new Map(Object.values(panels).map(mesh => [mesh, boundaryParticles(mesh)]))
 
   for (const seam of Object.values(document.seams)) {
     const panelA = document.panels[seam.a.panelId]
@@ -22,20 +23,26 @@ export function buildSeamConstraints(
     if (!resolved) continue
     const pointsA = resolved.pointsA
     const pointsB = resolved.pointsB
-    const edgeParticlesA = orderedEdgeParticles(panelA, meshA, pointsA)
-    const edgeParticlesB = orderedEdgeParticles(panelB, meshB, pointsB)
+    // Match the same 12-segment authored outline used by buildPanelSimMesh.
+    // A wide proximity band also captures the first interior row and sews
+    // opposing boundaries to those interior vertices, folding the cloth edge.
+    const outline = {
+      pointsA: samplePanelEdge(panelA, seam.a.edgeId, 12, seam.a.reversed),
+      pointsB: samplePanelEdge(panelB, seam.b.edgeId, 12, Boolean(seam.b.reversed) !== resolved.reversedB),
+    }
+    const edgeParticlesA = orderedEdgeParticles(meshA, outline.pointsA, boundaries.get(meshA)!)
+    const edgeParticlesB = orderedEdgeParticles(meshB, outline.pointsB, boundaries.get(meshB)!)
     const count = Math.max(edgeParticlesA.length, edgeParticlesB.length)
     const seen = new Set<string>()
 
     if (edgeParticlesA.length >= 2 && edgeParticlesB.length >= 2 && count >= 2) {
-      for (let index = 0; index < count; index += 1) {
-        const aIsLonger = edgeParticlesA.length >= edgeParticlesB.length
-        const particleA = aIsLonger
-          ? sampleOrderedParticle(edgeParticlesA, index, count)
-          : sampleOrderedParticle(edgeParticlesA, index, Math.max(2, edgeParticlesA.length))
-        const particleB = aIsLonger
-          ? sampleOrderedParticle(edgeParticlesB, index, Math.max(2, edgeParticlesB.length))
-          : sampleOrderedParticle(edgeParticlesB, index, count)
+      // Reciprocal matches cover every boundary sample even when spacing is
+      // nonuniform; a one-way nearest match can skip shorter-edge particles.
+      const pairs = [
+        ...edgeParticlesA.map(sample => [sample.particle, nearestEdgeParticle(edgeParticlesB, sample.t)]),
+        ...edgeParticlesB.map(sample => [nearestEdgeParticle(edgeParticlesA, sample.t), sample.particle]),
+      ]
+      for (const [particleA, particleB] of pairs) {
         if (particleA < 0 || particleB < 0 || particleA === particleB) continue
         const key = particleA < particleB ? `${particleA}:${particleB}` : `${particleB}:${particleA}`
         if (seen.has(key)) continue
@@ -61,8 +68,8 @@ export function buildSeamConstraints(
     for (let index = 0; index < fallbackCount; index += 1) {
       const sampleA = pointsA[Math.round((index / Math.max(1, fallbackCount - 1)) * Math.max(0, pointsA.length - 1))]
       const sampleB = pointsB[Math.round((index / Math.max(1, fallbackCount - 1)) * Math.max(0, pointsB.length - 1))]
-      const particleA = nearestParticle(meshA, sampleA.x, sampleA.y)
-      const particleB = nearestParticle(meshB, sampleB.x, sampleB.y)
+      const particleA = nearestParticle(meshA, sampleA.x, sampleA.y, boundaries.get(meshA)!)
+      const particleB = nearestParticle(meshB, sampleB.x, sampleB.y, boundaries.get(meshB)!)
       if (particleA < 0 || particleB < 0 || particleA === particleB) continue
       const key = particleA < particleB ? `${particleA}:${particleB}` : `${particleB}:${particleA}`
       if (seen.has(key)) continue
@@ -84,15 +91,16 @@ export function buildSeamConstraints(
 }
 
 function orderedEdgeParticles(
-  panel: PatternDocument['panels'][string],
   mesh: CompiledPanelSimMesh,
   edgePoints: Array<{ x: number; y: number }>,
+  boundary: Set<number>,
 ) {
   if (edgePoints.length < 2 || mesh.panelInfo.particleIndices.length === 0) return []
-  const toleranceSq = Math.max(36, (panel.particleDistance * 0.75) ** 2)
+  const toleranceSq = 1e-8
   const matches: Array<{ particle: number; t: number; distSq: number }> = []
 
   for (let localIndex = 0; localIndex < mesh.panelInfo.particleIndices.length; localIndex += 1) {
+    if (!boundary.has(mesh.panelInfo.particleIndices[localIndex])) continue
     const projection = projectPointToPolyline(
       edgePoints,
       mesh.panelLocalPositions[localIndex * 2],
@@ -107,13 +115,26 @@ function orderedEdgeParticles(
   }
 
   matches.sort((a, b) => a.t - b.t || a.distSq - b.distSq)
-  return matches.map((match) => match.particle)
+  return matches
 }
 
-function sampleOrderedParticle(sequence: number[], index: number, count: number) {
-  if (!sequence.length) return -1
-  if (count <= 1 || sequence.length === 1) return sequence[0]
-  return sequence[Math.round((index / (count - 1)) * (sequence.length - 1))]
+function nearestEdgeParticle(sequence: Array<{particle: number; t: number}>, t: number) {
+  let nearest = sequence[0]
+  for (const sample of sequence) if (Math.abs(sample.t - t) < Math.abs(nearest.t - t)) nearest = sample
+  return nearest.particle
+}
+
+function boundaryParticles(mesh: CompiledPanelSimMesh) {
+  const edges = new Map<string, {a: number; b: number; count: number}>()
+  const triangles = mesh.panelInfo.triangleIndices
+  for (let i = 0; i < triangles.length; i += 3) for (let corner = 0; corner < 3; corner++) {
+    const a = triangles[i + corner], b = triangles[i + (corner + 1) % 3]
+    const key = a < b ? `${a}:${b}` : `${b}:${a}`
+    const edge = edges.get(key)
+    if (edge) edge.count++
+    else edges.set(key, {a, b, count: 1})
+  }
+  return new Set([...edges.values()].filter(edge => edge.count === 1).flatMap(edge => [edge.a, edge.b]))
 }
 
 function projectPointToPolyline(points: Array<{ x: number; y: number }>, x: number, y: number) {
@@ -187,10 +208,12 @@ function nearestParticle(
   mesh: CompiledPanelSimMesh,
   x: number,
   y: number,
+  boundary: Set<number>,
 ) {
   let best = -1
   let bestDist = Infinity
   for (let localIndex = 0; localIndex < mesh.panelInfo.particleIndices.length; localIndex += 1) {
+    if (!boundary.has(mesh.panelInfo.particleIndices[localIndex])) continue
     const dx = mesh.panelLocalPositions[localIndex * 2] - x
     const dy = mesh.panelLocalPositions[localIndex * 2 + 1] - y
     const dist = dx * dx + dy * dy

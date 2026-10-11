@@ -203,32 +203,19 @@ function buildPinConstraints(
  */
 function resamplePolyline(loop: Vec2[], step: number): Vec2[] {
   if (loop.length < 2) return loop
-  // Build the closed perimeter as segments.
-  const pts = [...loop, loop[0]]
-  let total = 0
-  const segLen: number[] = []
-  for (let i = 0; i < pts.length - 1; i += 1) {
-    const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y)
-    segLen.push(len)
-    total += len
-  }
-  if (total <= 1e-6) return loop
-  const count = Math.max(3, Math.round(total / step))
-  const spacing = total / count
+  // Preserve the exact sampled outline used by the render mesh. Uniform
+  // spacing around the whole perimeter skips corners and bridges across them,
+  // leaving render vertices outside the simulation surface they embed into.
   const out: Vec2[] = []
-  let seg = 0
-  let segStart = 0
-  for (let i = 0; i < count; i += 1) {
-    const target = i * spacing
-    while (seg < segLen.length - 1 && segStart + segLen[seg] < target) {
-      segStart += segLen[seg]
-      seg += 1
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i], b = loop[(i + 1) % loop.length]
+    const length = Math.hypot(b.x - a.x, b.y - a.y)
+    if (length <= 1e-9) continue
+    const segments = Math.max(1, Math.ceil(length / step))
+    for (let j = 0; j < segments; j++) {
+      const t = j / segments
+      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t })
     }
-    const t = segLen[seg] > 1e-9 ? (target - segStart) / segLen[seg] : 0
-    out.push({
-      x: pts[seg].x + (pts[seg + 1].x - pts[seg].x) * t,
-      y: pts[seg].y + (pts[seg + 1].y - pts[seg].y) * t,
-    })
   }
   return out
 }
