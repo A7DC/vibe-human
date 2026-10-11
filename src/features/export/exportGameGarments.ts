@@ -210,6 +210,57 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geometry.setIndex(indices); geometry.computeVertexNormals()
   const mesh = bindFittedGarment(body, geometry, name, material, 8)
+  // A sewn sleeve is one cross-section. Front chest skin can be almost entirely
+  // breast-weighted while its matching rear vertex follows the upper-arm bone;
+  // independently transferring those weights folds the connecting seam at idle.
+  // Share the source-derived blend across matching outer panel vertices, fading
+  // inward so the centre chest still retains its original source weighting.
+  const garmentPosition = mesh.geometry.getAttribute('position')
+  const skinIndex = mesh.geometry.getAttribute('skinIndex'), skinWeight = mesh.geometry.getAttribute('skinWeight')
+  const sections = new Map<string, number[]>()
+  for (let i = 0; i < garmentPosition.count; i++) {
+    if (Math.abs(garmentPosition.getX(i)) < .28 || garmentPosition.getY(i) < 2.54) continue
+    const key = `${garmentPosition.getX(i).toFixed(5)}:${garmentPosition.getY(i).toFixed(5)}`
+    const vertices = sections.get(key) ?? []; vertices.push(i); sections.set(key, vertices)
+  }
+  for (const vertices of sections.values()) {
+    if (vertices.length < 2) continue
+    const average = new Map<number, number>()
+    for (const i of vertices) for (let c = 0; c < 4; c++) {
+      const bone = component(skinIndex, i, c)
+      average.set(bone, (average.get(bone) ?? 0) + component(skinWeight, i, c) / vertices.length)
+    }
+    for (const i of vertices) {
+      const blend = THREE.MathUtils.smoothstep(Math.abs(garmentPosition.getX(i)), .28, .40)
+      const combined = new Map([...average].map(([bone, weight]) => [bone, weight * blend]))
+      for (let c = 0; c < 4; c++) {
+        const bone = component(skinIndex, i, c)
+        combined.set(bone, (combined.get(bone) ?? 0) + component(skinWeight, i, c) * (1 - blend))
+      }
+      const strongest = [...combined].sort((a, b) => b[1] - a[1]).slice(0, 4)
+      const total = strongest.reduce((sum, entry) => sum + entry[1], 0)
+      skinIndex.setXYZW(i, ...[0, 1, 2, 3].map(c => strongest[c]?.[0] ?? 0) as [number, number, number, number])
+      skinWeight.setXYZW(i, ...[0, 1, 2, 3].map(c => (strongest[c]?.[1] ?? 0) / total) as [number, number, number, number])
+    }
+    for (const morph of mesh.geometry.morphAttributes.position ?? []) {
+      const meanX = vertices.reduce((sum, i) => sum + morph.getX(i), 0) / vertices.length
+      const meanY = vertices.reduce((sum, i) => sum + morph.getY(i), 0) / vertices.length
+      for (const i of vertices) {
+        const blend = THREE.MathUtils.smoothstep(Math.abs(garmentPosition.getX(i)), .28, .40)
+        morph.setX(i, THREE.MathUtils.lerp(morph.getX(i), meanX, blend))
+        morph.setY(i, THREE.MathUtils.lerp(morph.getY(i), meanY, blend))
+      }
+      // Keep the authored front/back thickness positive at either build target.
+      const sorted = [...vertices].sort((a, b) => garmentPosition.getZ(a) - garmentPosition.getZ(b))
+      const back = sorted[0], front = sorted[sorted.length - 1]
+      const baseDepth = garmentPosition.getZ(front) - garmentPosition.getZ(back)
+      const targetDepth = baseDepth + morph.getZ(front) - morph.getZ(back)
+      if (targetDepth < baseDepth * .25) {
+        const correction = (baseDepth * .25 - targetDepth) / 2
+        morph.setZ(front, morph.getZ(front) + correction); morph.setZ(back, morph.getZ(back) - correction)
+      }
+    }
+  }
   geometry.dispose()
   mesh.userData.garmentAuthoring = { source: 'upstream createDemoGarment two-panel sewing pattern', seams: Object.keys(document.seams), runtimeCloth: false }
   return mesh
