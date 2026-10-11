@@ -303,6 +303,34 @@ function buildPatternTop(body: THREE.SkinnedMesh, name: string, material: THREE.
   return mesh
 }
 
+let trainerPanelTexture: THREE.DataTexture | undefined
+function getTrainerPanelTexture() {
+  if (trainerPanelTexture) return trainerPanelTexture
+  const width = 64, height = 128, pixels = new Uint8Array(width * height * 4)
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const u = (x + .5) / width, v = (y + .5) / height, side = Math.abs(u - .5)
+    let tone = 252
+    // Projected textile tongue, three crossed lace rows and a curved toe seam.
+    // Paint directly on the proven clean upper: separate lace boxes were buried
+    // beneath it, and added foot topology previously caused animation spikes.
+    if (side < .18 && v > .65 && v < .91) tone = 220
+    if (side > .155 && side < .185 && v > .67 && v < .90) tone = 184
+    for (const row of [.74, .81, .875]) {
+      if (side < .16 && (Math.abs(v - row - (u - .5) * .19) < .009 || Math.abs(v - row + (u - .5) * .19) < .009)) tone = 137
+    }
+    if (Math.abs(v - (.94 - side * side * .34)) < .009) tone = 184
+    if (v < .17) tone = 211
+    const i = (y * width + x) * 4
+    pixels[i] = pixels[i + 1] = pixels[i + 2] = tone; pixels[i + 3] = 255
+  }
+  const map = new THREE.DataTexture(pixels, width, height, THREE.RGBAFormat)
+  map.name = 'trainer-tongue-laces-toe-panels'; map.colorSpace = THREE.SRGBColorSpace
+  map.magFilter = THREE.LinearFilter; map.minFilter = THREE.LinearMipmapLinearFilter
+  map.generateMipmaps = true; map.needsUpdate = true
+  trainerPanelTexture = map
+  return map
+}
+
 /** Clean authored trainer volumes; raw toe triangles/rims never enter footwear. */
 function buildCleanTrainers(body: THREE.SkinnedMesh, upperName: string, soleName: string, upperColour: THREE.ColorRepresentation, soleColour: THREE.ColorRepresentation): THREE.SkinnedMesh[] {
   const source = body.geometry.getAttribute('position')
@@ -314,17 +342,20 @@ function buildCleanTrainers(body: THREE.SkinnedMesh, upperName: string, soleName
     return { sign, indices, bounds, bone }
   })
   return [false, true].map(sole => {
-    const positions: number[] = [], indices: number[] = [], weights: number[] = [], joints: number[] = [], owner: number[] = []
+    const positions: number[] = [], indices: number[] = [], weights: number[] = [], joints: number[] = [], owner: number[] = [], uv: number[] = []
     const sides = 16
     feet.forEach((foot, f) => {
       const centre = foot.bounds.getCenter(new THREE.Vector3()), size = foot.bounds.getSize(new THREE.Vector3())
       const halfX = size.x / 2 + .022, halfZ = size.z / 2 + .038, centreZ = centre.z + .014
       const start = positions.length / 3
-      const rings = sole ? [{ y: .008, x: 1, z: 1, cz: centreZ }, { y: .067, x: 1, z: 1, cz: centreZ }]
-        : [{ y: .062, x: .98, z: .985, cz: centreZ }, { y: .142, x: .92, z: .91, cz: centreZ - .01 }, { y: .245, x: .69, z: .31, cz: foot.bounds.min.z + size.z * .31 }]
+      const rings = sole ? [{ y: .008, x: 1, z: 1, cz: centreZ }, { y: .067, x: .975, z: .985, cz: centreZ }]
+        // Native +Z is the toe. The trouser hem hides v<~.7, so put the
+        // visible tongue/laces forward and raise the instep just behind the toe.
+        : [{ y: .062, x: .96, z: .97, cz: centreZ }, { y: .126, x: .88, z: .91, cz: centreZ - .01 }, { y: .195, x: .80, z: .61, cz: centreZ - .025 }, { y: .245, x: .69, z: .31, cz: foot.bounds.min.z + size.z * .31 }]
       for (const ring of rings) for (let j = 0; j < sides; j++) {
         const angle = j / sides * Math.PI * 2, x = Math.cos(angle), z = Math.sin(angle)
         positions.push(centre.x + Math.sign(x) * Math.sqrt(Math.abs(x)) * halfX * ring.x, ring.y, ring.cz + Math.sign(z) * Math.sqrt(Math.abs(z)) * halfZ * ring.z)
+        uv.push(.5 + Math.sign(x) * Math.sqrt(Math.abs(x)) * ring.x / 2, .5 + (ring.cz + Math.sign(z) * Math.sqrt(Math.abs(z)) * halfZ * ring.z - centreZ) / (2 * halfZ))
         joints.push(foot.bone, 0, 0, 0); weights.push(1, 0, 0, 0); owner.push(f)
       }
       for (let ring = 0; ring < rings.length - 1; ring++) for (let j = 0; j < sides; j++) {
@@ -334,6 +365,7 @@ function buildCleanTrainers(body: THREE.SkinnedMesh, upperName: string, soleName
       if (sole) for (let j = 1; j < sides - 1; j++) { indices.push(start, start + j, start + j + 1); indices.push(start + sides, start + sides + j + 1, start + sides + j) }
     })
     const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2))
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(joints, 4)); geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(weights, 4)); geometry.setIndex(indices)
     geometry.morphTargetsRelative = true
     geometry.morphAttributes.position = (body.geometry.morphAttributes.position ?? []).map(morph => {
@@ -355,6 +387,7 @@ function buildCleanTrainers(body: THREE.SkinnedMesh, upperName: string, soleName
     })
     geometry.computeVertexNormals(); geometry.computeBoundingBox(); geometry.computeBoundingSphere()
     const name = sole ? soleName : upperName, mat = new THREE.MeshStandardMaterial({ color: sole ? soleColour : upperColour, roughness: .98, side: THREE.DoubleSide }); mat.name = name
+    if (!sole) mat.map = getTrainerPanelTexture()
     const mesh = skinnedPart(body, name, geometry, mat); mesh.userData.garmentAuthoring = { source: 'clean foot-bound trainer volume', weightedTo: 'approved DEF-foot.L/R', runtimeCloth: false }; return mesh
   })
 }
@@ -589,7 +622,6 @@ function relaxGarmentSilhouette(mesh: THREE.SkinnedMesh, kind: 'tshirt' | 'coat'
 /** All shop variants are authored derivatives of the approved rig, with distinct garment silhouettes. */
 export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.SkinnedMesh): StarterGarmentExport {
   const result = buildGameStarterGarments(body)
-  const position = body.geometry.getAttribute('position')
   const centre = (source: THREE.BufferGeometry, triangle: [number, number, number]) => {
     const p = source.getAttribute('position')
     return new THREE.Vector3(...([0, 1, 2].map(c => triangle.reduce((sum, i) => sum + component(p, i, c), 0) / 3) as [number, number, number]))
@@ -618,11 +650,6 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
     const mesh = bindFittedGarment(source, geometry, name, material(name, colour)); geometry.dispose(); return mesh
   }
   const box = (size: [number, number, number], at: [number, number, number]) => new THREE.BoxGeometry(...size).translate(...at)
-  const footBounds = [-1, 1].map(sign => {
-    const bounds = new THREE.Box3()
-    for (let i = 0; i < position.count; i++) if (position.getY(i) < .23 && Math.sign(position.getX(i)) === sign) bounds.expandByPoint(new THREE.Vector3(position.getX(i), position.getY(i), position.getZ(i)))
-    return bounds
-  })
   for (const variant of variants) {
     const shade = new THREE.Color(variant.colour), dark = shade.clone().multiplyScalar(.6), light = shade.clone().lerp(new THREE.Color(0xe5dfce), .24)
     const tshirt = `tshirt-${variant.id}`
@@ -665,16 +692,6 @@ export function buildGameCatalogGarments(body: THREE.SkinnedMesh, head: THREE.Sk
 
     const trainers = `trainers-${variant.id}`
     const trainerMeshes = buildCleanTrainers(body, trainers, `${trainers}-soles`, shade, 0xc9c7b9).map(add)
-    footBounds.forEach((bounds, side) => {
-      const size = bounds.getSize(new THREE.Vector3()), centre = bounds.getCenter(new THREE.Vector3())
-      for (let lace = 0; lace < 3; lace++) {
-        const mesh = prop(body, `${trainers}-lace-${side}-${lace}`, box([size.x * .58, .014, .018], [centre.x, .175, centre.z + lace * .04]), 0xe4dfd1)
-        const bone = body.skeleton.bones.findIndex(bone => bone.name === THREE.PropertyBinding.sanitizeNodeName(`DEF-foot.${centre.x > 0 ? 'L' : 'R'}`) || bone.name === `DEF-foot.${centre.x > 0 ? 'L' : 'R'}`)
-        const joints = mesh.geometry.getAttribute('skinIndex'), weights = mesh.geometry.getAttribute('skinWeight')
-        for (let i = 0; i < joints.count; i++) { joints.setXYZW(i, bone, 0, 0, 0); weights.setXYZW(i, 1, 0, 0, 0) }
-        trainerMeshes.push(add(mesh))
-      }
-    })
     result.manifestGarments[trainers] = { meshes: trainerMeshes, hides: ['body-covered-shoes'] }
 
     const cap = `cap-${variant.id}`
