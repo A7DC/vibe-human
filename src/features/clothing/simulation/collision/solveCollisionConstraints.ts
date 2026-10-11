@@ -56,7 +56,7 @@ export function solveCollisionConstraints(mesh: ClothSimMesh, snapshot: Collider
     }
 
     for (const patch of snapshot.lowResMeshPatches ?? []) {
-      if (!pushOutOfLowResPatch(patch, px, py, pz, CONTACT_RESULT)) continue
+      if (!pushOutOfLowResPatch(patch, prevX, prevY, prevZ, px, py, pz, CONTACT_RESULT)) continue
       px = CONTACT_RESULT[0]
       py = CONTACT_RESULT[1]
       pz = CONTACT_RESULT[2]
@@ -126,7 +126,7 @@ function solveTriangleCollisionConstraints(mesh: ClothSimMesh, snapshot: Collide
     }
 
     for (const patch of snapshot.lowResMeshPatches ?? []) {
-      if (!pushOutOfLowResPatch(patch, px, py, pz, CONTACT_RESULT)) continue
+      if (!pushOutOfLowResPatch(patch, prevX, prevY, prevZ, px, py, pz, CONTACT_RESULT)) continue
       px = CONTACT_RESULT[0]
       py = CONTACT_RESULT[1]
       pz = CONTACT_RESULT[2]
@@ -212,13 +212,28 @@ function applyContactFriction(
 
 function pushOutOfLowResPatch(
   patch: CollisionMeshPatchSnapshot,
+  prevX: number,
+  prevY: number,
+  prevZ: number,
   px: number,
   py: number,
   pz: number,
   out: Float32Array,
 ) {
   const target = patch.skin + patch.thickness
-  if (target <= 0 || patch.indices.length < 3 || isOutsideBounds(patch.bounds, target, px, py, pz)) return false
+  if (target <= 0 || patch.indices.length < 3) return false
+
+  // A cloth layer is two-sided: a crossing must stay on its starting side,
+  // before discrete contact chooses the side of the final point. Authoring
+  // patches may retain the BVH of the mesh snapshot they were built from.
+  const accelerated = patch as CollisionMeshPatchSnapshot & Pick<MeshSurfaceColliderSnapshot, 'bvh'>
+  if (prevX !== px || prevY !== py || prevZ !== pz) {
+    const swept = accelerated.bvh
+      ? pushOutOfSweptMeshColliderBVH(accelerated, target, prevX, prevY, prevZ, px, py, pz, out)
+      : pushOutOfSweptMeshCollider(patch, target, prevX, prevY, prevZ, px, py, pz, out)
+    if (swept) return true
+  }
+  if (isOutsideBounds(patch.bounds, target, px, py, pz)) return false
 
   const searchRadius = colliderSearchRadius(target, patch.cellSize)
   const cx = Math.floor(px / patch.cellSize)
@@ -560,7 +575,7 @@ function pushOutOfMeshColliderBVH(
 // BVH-accelerated swept (anti-tunneling) path. Mirrors pushOutOfSweptMeshCollider
 // but pulls candidates from the BVH segment query instead of the cell box.
 function pushOutOfSweptMeshColliderBVH(
-  collider: MeshSurfaceColliderSnapshot,
+  collider: TriangleColliderSurface & Pick<MeshSurfaceColliderSnapshot, 'bvh'>,
   target: number,
   startX: number,
   startY: number,
@@ -607,7 +622,7 @@ function pushOutOfSweptMeshColliderBVH(
 }
 
 function pushOutOfSweptMeshCollider(
-  collider: MeshSurfaceColliderSnapshot,
+  collider: TriangleColliderSurface,
   target: number,
   startX: number,
   startY: number,
@@ -684,7 +699,7 @@ function pushOutOfSweptMeshCollider(
 }
 
 function segmentIntersectsTriangle(
-  collider: MeshSurfaceColliderSnapshot,
+  collider: TriangleColliderSurface,
   triangle: number,
   startX: number,
   startY: number,
