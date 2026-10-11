@@ -437,7 +437,12 @@ export function buildGameStarterGarments(body: THREE.SkinnedMesh): StarterGarmen
     // waist triangles that extend beyond a garment's animated hem/rim.
     const coveredTop = top(p) && triangle.every(i => position.getY(i) >= 2.08) && (Math.abs(p.x) < .46 || triangle.every(i => Math.abs(position.getX(i)) < sleeveHalfWidth))
     const coveredBottom = bottom(p) && triangle.every(i => position.getY(i) <= 1.96)
-    const region = coveredTop ? 'top' : shoes(p) ? 'shoes' : coveredBottom ? 'bottom' : p.y > 2.2 && p.y < 2.95 && Math.abs(p.x) < 1.36 ? 'sleeves' : 'exposed'
+    // Corrected sewn long sleeves continuously cover the old 1.36 skin cut:
+    // posed crouch rays hit exposed skin at |x|1.363–1.380 through intact cloth.
+    // Residual triangle centroids reach 1.407; end coverage at 1.41, retaining
+    // skin under the measured cuff at 1.418+.
+    // This region remains visible with short sleeves; hands are not removed.
+    const region = coveredTop ? 'top' : shoes(p) ? 'shoes' : coveredBottom ? 'bottom' : p.y > 2.2 && p.y < 2.95 && Math.abs(p.x) < 1.41 ? 'sleeves' : 'exposed'
     masks[region].push(triangle)
     if (top(p)) garmentFaces.top.push(triangle)
     if (bottom(p)) garmentFaces.bottom.push(triangle)
