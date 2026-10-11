@@ -132,7 +132,27 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
   const combTexture=new THREE.CanvasTexture(combCanvas);combTexture.colorSpace=THREE.SRGBColorSpace
   const sidepartMaterial=new THREE.MeshStandardMaterial({name:'GameSidepart',color:0x30251e,roughness:1,side:THREE.DoubleSide,map:combTexture})
   const stubbleMaterial = new THREE.MeshStandardMaterial({name:'GameStubble',color:0x30251e,roughness:1,side:THREE.DoubleSide,transparent:true,opacity:.24,depthWrite:false})
-  const beardMaterial = new THREE.MeshStandardMaterial({name:'GameBeard',color:0x30251e,roughness:1,side:THREE.DoubleSide,transparent:true,opacity:.82,depthWrite:false})
+  // A tiny neutral strand/density map keeps any chosen dye colour, while
+  // breaking up the smooth jaw overlay without adding floating hair cards.
+  const beardCanvas=document.createElement('canvas');beardCanvas.width=128;beardCanvas.height=128
+  const beardContext=beardCanvas.getContext('2d')!,beardPixels=beardContext.createImageData(128,128)
+  const noise=(x:number,y:number)=>{const n=Math.sin(x*127.1+y*311.7)*43758.5453;return n-Math.floor(n)}
+  for(let y=0;y<128;y++)for(let x=0;x<128;x++) {
+    const nativeX=(x+.5)/128*.36-.18,nativeY=3.2-(y+.5)/128*.23
+    const upper=3.035+.85*Math.abs(nativeX),lower=2.995+.15*Math.abs(nativeX)
+    const edge=THREE.MathUtils.smoothstep(upper-nativeY,0,.016)*THREE.MathUtils.smoothstep(nativeY-lower,0,.010)
+    // Curved columns slope from cheeks toward the chin; long correlation in
+    // Y reads as short hairs, unlike independent salt-and-pepper pixels.
+    const strandX=Math.floor(x+Math.sign(nativeX)*(y-64)*.18)
+    const strand=noise(strandX,Math.floor(y/7)),grain=noise(x,y)
+    const value=Math.round(255*(.78+.18*strand+.04*grain)),i=(y*128+x)*4
+    beardPixels.data[i]=value;beardPixels.data[i+1]=value;beardPixels.data[i+2]=value
+    beardPixels.data[i+3]=Math.round(255*edge*(.5+.5*strand))
+  }
+  beardContext.putImageData(beardPixels,0,0)
+  const beardTexture=new THREE.CanvasTexture(beardCanvas);beardTexture.colorSpace=THREE.SRGBColorSpace
+  beardTexture.magFilter=THREE.LinearFilter;beardTexture.minFilter=THREE.LinearMipmapLinearFilter
+  const beardMaterial = new THREE.MeshStandardMaterial({name:'GameBeard',color:0x30251e,roughness:1,side:THREE.DoubleSide,transparent:true,opacity:.82,depthWrite:false,map:beardTexture})
   const cardMaterial = new THREE.MeshStandardMaterial({name:'GameHairCards',color:0x30251e,roughness:1,side:THREE.DoubleSide,alphaTest:.38})
   const meshes: THREE.SkinnedMesh[] = []
   const choices: Record<Style,string[]> = {shaved:[],crop:[],sidepart:[],stubble:[],beard:[]}
@@ -202,6 +222,11 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
     geometry.setAttribute('normal',new THREE.Float32BufferAttribute(normals,3));geometry.setIndex(indices)
     const facial=style==='beard'||style==='stubble'
     const simplified=facial?geometry:simplifySurface(geometry,800)
+    if(style==='beard') {
+      const uv:number[]=[]
+      for(const v of vertices)uv.push((position.getX(v)+.18)/.36,(position.getY(v)-2.97)/.23)
+      simplified.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2))
+    }
     if(style==='sidepart') {
       const vertices=simplified.getAttribute('position'),uv:number[]=[]
       for(let i=0;i<vertices.count;i++)uv.push((vertices.getX(i)+.24)/.48,(vertices.getZ(i)+.24)/.48)
