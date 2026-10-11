@@ -49,11 +49,11 @@ function simplifySurface(source: THREE.BufferGeometry, triangleLimit: number) {
   return result
 }
 
-/** Retain only eight representative cards per region, each two curved quads.
+/** Retain only two representative cards per region, each two curved quads.
  * Upstream cards have duplicated back faces and six length segments; a two-sided
  * material supplies their backs and the short game hair needs only two segments. */
 function compactCards(source: THREE.BufferGeometry, count: number) {
-  const kept=Math.min(8,count), verticesPerCard=source.getAttribute('position').count/count
+  const kept=Math.min(2,count), verticesPerCard=source.getAttribute('position').count/count
   const result=new THREE.BufferGeometry(), indices:number[]=[]
   for(const attributeName of ['position','normal','uv']) {
     const attribute=source.getAttribute(attributeName), values:number[]=[]
@@ -69,6 +69,16 @@ function compactCards(source: THREE.BufferGeometry, count: number) {
   }
   for(let card=0;card<kept;card++)for(let row=0;row<2;row++) {
     const a=card*6+row*2;indices.push(a,a+1,a+2,a+1,a+3,a+2)
+  }
+  // Region fitting can make a card as wide as a whole temple. Keep only a
+  // narrow ribbon around its guide; the continuous shell supplies coverage.
+  const points=result.getAttribute('position')
+  for(let i=0;i<points.count;i+=2) {
+    const a=new THREE.Vector3().fromBufferAttribute(points,i), b=new THREE.Vector3().fromBufferAttribute(points,i+1)
+    const midpoint=a.clone().add(b).multiplyScalar(.5), half=b.clone().sub(a).multiplyScalar(.5)
+    half.clampLength(0,.014)
+    points.setXYZ(i,...midpoint.clone().sub(half).toArray() as [number,number,number])
+    points.setXYZ(i+1,...midpoint.clone().add(half).toArray() as [number,number,number])
   }
   result.setIndex(indices);source.dispose()
   return {geometry:result,cardCount:kept}
@@ -98,10 +108,31 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
   })
   const beard = faces.filter(({center:p,normal:n}) => p.y > 2.965 && p.y < 3.195 && p.z > .07
     && Math.abs(p.x) < .158 && n.z > .12
+    && p.y < 3.035 + .85 * Math.abs(p.x)
     && !(p.y > 3.075 && p.y < 3.135 && Math.abs(p.x) < .072)
     && !(p.y > 3.145 && Math.abs(p.x) < .048))
   if (scalp.length < 20 || beard.length < 10) throw new Error('Native head scalp/beard masks are empty')
   const shellMaterial = new THREE.MeshStandardMaterial({name:'GameHair',color:0x30251e,roughness:1,side:THREE.DoubleSide})
+  // A low-resolution neutral comb map stays tintable by the hair-colour
+  // control. The part is drawn on the closed scalp shell, never cut from it.
+  const combCanvas=document.createElement('canvas');combCanvas.width=256;combCanvas.height=256
+  const comb=combCanvas.getContext('2d')!
+  comb.fillStyle='#eeeeee';comb.fillRect(0,0,256,256)
+  comb.lineCap='round'
+  for(let i=0;i<24;i++) {
+    const row=30+i*8, part=98+(row-128)*.12
+    comb.strokeStyle=i%3===0?'#b8b8b8':'#d0d0d0';comb.lineWidth=1.5
+    comb.beginPath();comb.moveTo(part+4,row)
+    comb.quadraticCurveTo(157,row-19,251,row+18);comb.stroke()
+    comb.beginPath();comb.moveTo(part-4,row)
+    comb.quadraticCurveTo(52,row+6,4,row+34);comb.stroke()
+  }
+  comb.strokeStyle='#888888';comb.lineWidth=4
+  comb.beginPath();comb.moveTo(86,30);comb.quadraticCurveTo(98,126,111,230);comb.stroke()
+  const combTexture=new THREE.CanvasTexture(combCanvas);combTexture.colorSpace=THREE.SRGBColorSpace
+  const sidepartMaterial=new THREE.MeshStandardMaterial({name:'GameSidepart',color:0x30251e,roughness:1,side:THREE.DoubleSide,map:combTexture})
+  const stubbleMaterial = new THREE.MeshStandardMaterial({name:'GameStubble',color:0x30251e,roughness:1,side:THREE.DoubleSide,transparent:true,opacity:.24,depthWrite:false})
+  const beardMaterial = new THREE.MeshStandardMaterial({name:'GameBeard',color:0x30251e,roughness:1,side:THREE.DoubleSide,transparent:true,opacity:.82,depthWrite:false})
   const cardMaterial = new THREE.MeshStandardMaterial({name:'GameHairCards',color:0x30251e,roughness:1,side:THREE.DoubleSide,alphaTest:.38})
   const meshes: THREE.SkinnedMesh[] = []
   const choices: Record<Style,string[]> = {shaved:[],crop:[],sidepart:[],stubble:[],beard:[]}
@@ -124,20 +155,34 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
     for (const v of vertices) {
       const p = new THREE.Vector3().fromBufferAttribute(position,v), n = new THREE.Vector3().fromBufferAttribute(normal,v)
       const crown = THREE.MathUtils.smoothstep(p.y,3.31,3.47)
-      const offset = style === 'shaved' ? .004 : style === 'crop' ? .016 + .019 * crown
-        : style === 'sidepart' ? .013 + .057 * crown : style === 'stubble' ? .003 : .011
-      p.addScaledVector(n,offset);points.push(...p.toArray());normals.push(...n.toArray())
+      const offset = style === 'shaved' ? .004 : style === 'crop' ? .024 + .019 * crown
+        : style === 'sidepart' ? .024 + .044 * crown : style === 'stubble' ? .014 : .020
+      p.addScaledVector(n,offset)
+      if(style==='sidepart') {
+        // Lift and sweep the long side away from the left-hand part. Preserve
+        // the shell clearance so the asymmetric silhouette cannot expose skin.
+        const swept=THREE.MathUtils.smoothstep(p.x,-.08,.08)
+        p.x+=.038*crown
+        p.y+=.044*crown*swept
+      }
+      points.push(...p.toArray());normals.push(...n.toArray())
     }
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position',new THREE.Float32BufferAttribute(points,3))
     geometry.setAttribute('normal',new THREE.Float32BufferAttribute(normals,3));geometry.setIndex(indices)
-    add(simplifySurface(geometry,style==='beard'||style==='stubble'?180:400),`groom-${style}-base`,style,shellMaterial)
+    const simplified=simplifySurface(geometry,style==='beard'||style==='stubble'?400:800)
+    if(style==='sidepart') {
+      const vertices=simplified.getAttribute('position'),uv:number[]=[]
+      for(let i=0;i<vertices.count;i++)uv.push((vertices.getX(i)+.24)/.48,(vertices.getZ(i)+.24)/.48)
+      simplified.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2))
+    }
+    add(simplified,`groom-${style}-base`,style,style==='stubble'?stubbleMaterial:style==='beard'?beardMaterial:style==='sidepart'?sidepartMaterial:shellMaterial)
   }
-  for (const style of ['shaved','crop','sidepart','stubble','beard'] as Style[]) {
+  for (const style of ['crop','sidepart','stubble','beard'] as Style[]) {
     const selected = style === 'stubble' || style === 'beard' ? beard : scalp
     shell(selected,style)
-    if (style === 'shaved' || style === 'stubble') continue
-    const settings = {...createDefaultGroomSettings(),guideLength:style==='sidepart'?.115:style==='crop'?.045:.045,
+    if (style === 'stubble' || style === 'beard') continue
+    const settings = {...createDefaultGroomSettings(),guideLength:style==='sidepart'?.038:.025,
       guideSegments:4,strandDensity:.12,clumpStrength:.35,noiseAmplitude:.0008,curlStrength:0,frizzStrength:0,cutRandomness:.08}
     const materialSettings = {...createDefaultHairMaterialSettings(),melanin:0,melaninRedness:0,melaninRandomize:.03,rootDarken:.18}
     const triangleIds = selected.map(face=>face.id)
@@ -149,8 +194,7 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
     for (const guide of guides) {
       const start = new THREE.Vector3(...guide.points[0])
       const face = faces[guide.root.triangleIndex]
-      const direction = style === 'beard' ? face.normal.clone().multiplyScalar(.28).add(new THREE.Vector3(0,-.9,.12)).normalize()
-        : style === 'sidepart' ? face.normal.clone().multiplyScalar(.48).add(new THREE.Vector3(start.x < -.04 ? -.45 : .8, .13, -.30)).normalize()
+      const direction = style === 'sidepart' ? face.normal.clone().multiplyScalar(.48).add(new THREE.Vector3(start.x < -.04 ? -.45 : .8, .13, -.30)).normalize()
         : face.normal.clone().multiplyScalar(.9).add(new THREE.Vector3(.08,.16,-.12)).normalize()
       const length = style === 'sidepart' ? settings.guideLength * (.38 + .62 * THREE.MathUtils.smoothstep(start.y,3.26,3.45)) : settings.guideLength
       guide.points = guide.points.map((_,i) => start.clone().addScaledVector(face.normal,.006)
@@ -164,11 +208,11 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
     const groups = new Map<string,typeof strands>()
     for (const strand of strands) {
       const [x,y,z] = strand.points[0]
-      const region = style === 'beard' ? (x < -.055 ? 'left' : x > .055 ? 'right' : 'chin')
-        : y>3.39 ? 'crown' : Math.abs(x)>.105 ? (x>0?'left':'right') : z<.015?'back':'front'
+      const region = y>3.39 ? 'crown' : Math.abs(x)>.105 ? (x>0?'left':'right') : z<.015?'back':'front'
       const group=groups.get(region)??[];group.push(strand);groups.set(region,group)
     }
     for (const [region,group] of groups) {
+      if(region !== 'crown' && region !== 'front')continue
       const cards=buildHairCardMesh(group,0,materialSettings)
       if (!cards.cardCount) {cards.geometry.dispose();cards.atlas.dispose();continue}
       const compact=compactCards(cards.geometry,cards.cardCount)
@@ -187,5 +231,5 @@ export function buildGameGroom(head: THREE.SkinnedMesh): GameGroomExport {
   stats.meshes=meshes.length
   return {meshes,controls:{hair:{choices:{crop:choices.crop,shaved:choices.shaved,sidepart:choices.sidepart}},
     facialHair:{choices:{none:[],stubble:choices.stubble,beard:choices.beard}},
-    hairColour:{material:'GameHair',materials:['GameHairCards']}},stats}
+    hairColour:{material:'GameHair',materials:['GameHairCards','GameStubble','GameBeard','GameSidepart']}},stats}
 }
