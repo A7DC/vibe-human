@@ -20,6 +20,9 @@ export function createGameAnimations(root: THREE.Object3D): THREE.AnimationClip[
     thigh: find(`DEF-thigh.${side}`), shin: find(`DEF-thigh.${side}.001`),
     foot: find(`DEF-foot.${side}`), upper: find(`DEF-upper_arm.${side}`),
     forearm: find(`DEF-forearm.${side}.001`), hand: find(`DEF-hand.${side}`),
+    fingers: ['index', 'middle', 'ring', 'pinky'].map(digit =>
+      ['01', '02', '03'].map(segment => find(`DEF-f_${digit}.${segment}.${side}`))),
+    thumb: ['01', '02', '03'].map(segment => find(`DEF-thumb.${segment}.${side}`)),
   })
   const left = parts('L'), right = parts('R')
   const rest = new Map<THREE.Object3D, { p: THREE.Vector3; q: THREE.Quaternion }>()
@@ -90,7 +93,7 @@ export function createGameAnimations(root: THREE.Object3D): THREE.AnimationClip[
         record(part.foot, 'quaternion', shinQ.clone().invert().multiply(footQ))
         const armSwing = moving ? -swing * (running ? .58 : crouching ? .12 : .30) : .015 * breathe * sign
         const armAngle = (crouching ? .27 : airborne ? -.28 : 0) + armSwing
-        const elbow = running ? 1.12 : crouching ? .86 : airborne ? .72 : .17 + (moving ? .10 * Math.max(0, -swing) : .01 * breathe)
+        const elbow = running ? 1.12 : crouching ? .86 : airborne ? .72 : .24 + (moving ? .10 * Math.max(0, -swing) : .018 * breathe)
         const aim = (bone: THREE.Bone, angle: number, out: number) => {
           const bind = worldRest.get(bone)!
           const from = yAxis.clone().applyQuaternion(bind)
@@ -102,6 +105,25 @@ export function createGameAnimations(root: THREE.Object3D): THREE.AnimationClip[
         record(part.upper, 'quaternion', upperQ)
         record(part.forearm, 'quaternion', upperQ.clone().invert().multiply(lowerQ))
         record(part.hand, 'quaternion', rest.get(part.hand)!.q)
+        // Both mirrored native finger chains use +local X for palmar flexion:
+        // +Y follows each phalanx and +Z points toward the palm. Apply after
+        // each bind quaternion so native joint roll and finger spacing remain.
+        // Running uses a loose fist, with no thumb burial or rigid flat palm.
+        const grip = running ? 1 : airborne ? .65 : crouching ? .4 : moving ? .32 : .22
+        const pulse = .012 * breathe
+        for (const [digit, chain] of part.fingers.entries()) {
+          const stagger = 1 + digit * .035
+          for (const [segment, bone] of chain.entries()) {
+            const curl = ([.12, .16, .10][segment] + grip * [.46, .60, .35][segment] + pulse) * stagger
+            record(bone, 'quaternion', rest.get(bone)!.q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(xAxis,curl)))
+          }
+        }
+        // The thumb's native roll differs from the four fingers; keep its
+        // opposition conservative and bend only enough to rest by the index.
+        for (const [segment,bone] of part.thumb.entries()) {
+          const curl = [.035,.09,.07][segment] + grip * [.08,.19,.16][segment]
+          record(bone,'quaternion',rest.get(bone)!.q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(xAxis,curl)))
+        }
       }
       // Vertical compensation keeps the supporting ankle at its bind height;
       // knees shorten the legs naturally in crouch instead of sinking feet
