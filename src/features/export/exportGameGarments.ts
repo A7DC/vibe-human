@@ -498,23 +498,42 @@ function relaxGarmentSilhouette(mesh: THREE.SkinnedMesh, kind: 'tshirt' | 'coat'
     const centreX = kind === 'trousers' && y < 1.60 ? Math.sign(x || 1) * .205 : 0
     const dx = x - centreX, dz = z - .025, length = Math.hypot(dx, dz)
     if (length < .025) return null
-    return { key: `${centreX}:${Math.floor(y / .12)}`, centreX, nx: dx / length, nz: dz / length }
+    return { key: `${centreX}:${Math.floor(y / .12)}`, centreX, y, nx: dx / length, nz: dz / length }
   }
   for (const morph of geometry.morphAttributes.position ?? []) {
-    const means = new Map<string, { sum: number; count: number }>()
+    const means = new Map<string, { sum: number; sumY: number; height: number; count: number }>()
     for (let i = 0; i < p.count; i++) {
       const region = section(i); if (!region) continue
       const dx = morph.getX(i) - (geometry.morphTargetsRelative ? 0 : p.getX(i))
       const dz = morph.getZ(i) - (geometry.morphTargetsRelative ? 0 : p.getZ(i))
-      const entry = means.get(region.key) ?? { sum: 0, count: 0 }
-      entry.sum += dx * region.nx + dz * region.nz; entry.count++; means.set(region.key, entry)
+      const entry = means.get(region.key) ?? { sum: 0, sumY: 0, height: 0, count: 0 }
+      entry.sum += dx * region.nx + dz * region.nz
+      entry.sumY += morph.getY(i) - (geometry.morphTargetsRelative ? 0 : p.getY(i))
+      entry.height += region.y; entry.count++; means.set(region.key, entry)
     }
     for (let i = 0; i < p.count; i++) {
       const region = section(i); if (!region) continue
-      const entry = means.get(region.key)!, amount = entry.sum / entry.count
+      const entry = means.get(region.key)!
+      let amount = entry.sum / entry.count, vertical = entry.sumY / entry.count, blend = 1
+      if (kind !== 'trousers') {
+        // Continuous height filtering removes the old floor(y/.12) corrective
+        // steps, whose normal discontinuities lit up as horizontal chest bands.
+        // Each sampled band contributes equally, independent of panel density.
+        let radialSum = 0, verticalSum = 0, total = 0
+        for (const sample of means.values()) {
+          const weight = Math.exp(-.5 * ((region.y - sample.height / sample.count) / .15) ** 2)
+          radialSum += weight * sample.sum / sample.count
+          verticalSum += weight * sample.sumY / sample.count; total += weight
+        }
+        amount = radialSum / total; vertical = verticalSum / total
+        // Preserve the corrected shoulder seams and arm fit with a continuous
+        // fade into their original morphs, rather than another hard cutoff.
+        blend = (1 - THREE.MathUtils.smoothstep(Math.abs(original[i * 3]), .36, .50)) * (1 - THREE.MathUtils.smoothstep(region.y, 2.42, 2.60))
+      }
       const x = p.getX(i) - region.centreX, z = p.getZ(i) - .025, length = Math.hypot(x, z) || 1
-      morph.setX(i, x / length * amount + (geometry.morphTargetsRelative ? 0 : p.getX(i)))
-      morph.setZ(i, z / length * amount + (geometry.morphTargetsRelative ? 0 : p.getZ(i)))
+      morph.setX(i, mix(morph.getX(i), x / length * amount + (geometry.morphTargetsRelative ? 0 : p.getX(i)), blend))
+      morph.setZ(i, mix(morph.getZ(i), z / length * amount + (geometry.morphTargetsRelative ? 0 : p.getZ(i)), blend))
+      if (kind !== 'trousers') morph.setY(i, mix(morph.getY(i), vertical + (geometry.morphTargetsRelative ? 0 : p.getY(i)), blend))
     }
   }
   geometry.computeVertexNormals()
