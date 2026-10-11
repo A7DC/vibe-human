@@ -46,7 +46,9 @@ function assertNeckContinuity(value: { positionMax: number; correctiveMax: numbe
 
 /** Two mirrored cut panels, sewn by the original compiler/solver. Neckline pins
  * are offline authoring attachments; exported cloth follows the existing rig. */
-export async function authorUpstreamHood(root: THREE.Object3D, body: THREE.SkinnedMesh, head: THREE.SkinnedMesh, hoodie: THREE.SkinnedMesh) {
+export async function authorUpstreamHood(root: THREE.Object3D, body: THREE.SkinnedMesh, head: THREE.SkinnedMesh, hoodie: THREE.SkinnedMesh, extraLayers: THREE.SkinnedMesh[] = [], options: { maxAuthoringMs?: number } = {}) {
+  const maxAuthoringMs = options.maxAuthoringMs ?? 20000
+  if (!Number.isFinite(maxAuthoringMs) || maxAuthoringMs < 20000 || maxAuthoringMs > 60000) throw new Error('Hood authoring budget must be between 20 and 60 seconds')
   const arcs = {'hood-left':collarArc(hoodie.geometry,-1),'hood-right':collarArc(hoodie.geometry,1)}
   const panel = (id: keyof typeof arcs, sign: number): PatternPanel => {
     const base = arcs[id].at(-1)!.distance / .004
@@ -61,13 +63,32 @@ export async function authorUpstreamHood(root: THREE.Object3D, body: THREE.Skinn
   const compiled = compileGarmentRuntime(document,{quality:'high',seamSamples:18,renderSubdivisions:12})
   if(compiled.issues.some(issue=>issue.severity==='error'))throw Error(JSON.stringify(compiled.issues))
   const runtime=compiled.value, mesh=runtime.simMesh, entries=runtime.renderPanels.map(createRenderPanelEntry)
-  applyDocumentPlacements(mesh,document);refreshSeamPlacementRest(mesh)
+  applyDocumentPlacements(mesh,document)
+  // Thin garment collision preserves the side on which cloth starts. Place the
+  // ENTIRE free hood panel behind an outer jacket, not merely its centre.
+  // Collar pins are subsequently restored to the exact inner hoodie neckline.
+  let outerBackEnvelope: number | null = null, initialFreeBackMax: number | null = null
+  if (extraLayers.length) {
+    outerBackEnvelope = Infinity
+    for (const layer of extraLayers) {
+      const positions = layer.geometry.getAttribute('position')
+      for (let i=0;i<positions.count;i++) if (positions.getY(i)>2.35 && Math.abs(positions.getX(i))<.6) outerBackEnvelope=Math.min(outerBackEnvelope,positions.getZ(i))
+    }
+    if (!Number.isFinite(outerBackEnvelope)) throw Error('Outer hood layer has no upper-back envelope')
+    let panelMaxZ=-Infinity
+    for(let i=2;i<mesh.positions.length;i+=3)panelMaxZ=Math.max(panelMaxZ,mesh.positions[i])
+    const displacement=Math.min(0,outerBackEnvelope-.035-panelMaxZ)
+    for(let i=2;i<mesh.positions.length;i+=3){mesh.positions[i]+=displacement;mesh.prevPositions[i]+=displacement}
+    initialFreeBackMax=panelMaxZ+displacement
+  }
+  refreshSeamPlacementRest(mesh)
   const saved={scale:root.scale.clone(),quaternion:root.quaternion.clone(),position:root.position.clone(),modelPosition:root.children[0].position.clone(),parent:hoodie.parent}
   const temporaryGeometries = new Set(entries.map(entry => entry.geometry))
   const temporaryMaterials = new Set<THREE.Material>()
   let mergedGeometry: THREE.BufferGeometry | undefined
   let completed = false
-  body.parent!.add(hoodie)
+  const extraParents = extraLayers.map(mesh => ({mesh,parent:mesh.parent}))
+  body.parent!.add(hoodie,...extraLayers)
   try {
     root.scale.setScalar(1);root.quaternion.identity();root.position.set(0,-3.1,0);root.children[0].position.set(0,0,0);root.updateMatrixWorld(true);body.skeleton.update()
     for(const pin of mesh.pinConstraints){
@@ -79,12 +100,12 @@ export async function authorUpstreamHood(root: THREE.Object3D, body: THREE.Skinn
     }
     refreshSeamPlacementRest(mesh)
     const avatar=rebuildAvatarMeshCollider([body,head],null,{id:'hood.body',skinOffset:.012,garmentThickness:.006,friction:.55,cellSize:.09,triangleStride:1})!
-    const layer=rebuildAvatarMeshCollider([hoodie],null,{id:'hood.layer',skinOffset:.012,garmentThickness:.006,friction:.55,cellSize:.09,triangleStride:1})!
+    const layer=rebuildAvatarMeshCollider([hoodie,...extraLayers],null,{id:'hood.layer',skinOffset:.012,garmentThickness:.006,friction:.55,cellSize:.09,triangleStride:1})!
     const snapshot={version:1,proxies:[],meshColliders:[avatar.snapshot],lowResMeshPatches:[{...layer.snapshot,region:'chest' as const}]}
     const solver=new XPBDClothSolver(mesh,{...SOLVER_PRESETS.high,damping:.08,gravityDelayTime:.65})
     const started=performance.now();let maxMovement=0
     for(let step=0;step<240;step++){
-      if(performance.now()-started>20000)throw Error('Hood authoring exceeded20 seconds before240 steps')
+      if(performance.now()-started>maxAuthoringMs)throw Error(`Hood authoring exceeded ${maxAuthoringMs/1000} seconds at step ${step} of 240`)
       const previous=new Float32Array(mesh.positions);solver.step(snapshot);maxMovement=0
       for(let i=0;i<mesh.positions.length;i++){if(!Number.isFinite(mesh.positions[i]))throw Error('Hood drape diverged');maxMovement=Math.max(maxMovement,Math.abs(mesh.positions[i]-previous[i]))}
       if(step%3===0)await new Promise(resolve=>setTimeout(resolve,0))
@@ -158,12 +179,13 @@ export async function authorUpstreamHood(root: THREE.Object3D, body: THREE.Skinn
     // Hood UVs remain independent of torso atlas packing.
 
     geometry.computeBoundingBox();geometry.computeBoundingSphere()
-    const result = {geometry,report:{pipeline:'Original PatternDocument mirrored panels → compileGarmentRuntime → XPBDClothSolver → renderer embedding',steps:240,elapsedMs:performance.now()-started,maxMovement,particles:mesh.particleCount,triangles:geometry.index!.count/3,seams,neckContinuity,neckPins:mesh.pinConstraints.length,collarArcs:Object.fromEntries(Object.entries(arcs).map(([id,arc])=>[id,{samples:arc.length,length:arc.at(-1)!.distance}])),document,limitations:['Neutral authoring drape, not runtime cloth or proven convergence','Neckline authoring pins follow actual torso collar; exported boundary shares interpolated collar rig/morphs but remains separate topology','Candidate requires back/front and body-extreme motion review']}}
+    const result = {geometry,report:{pipeline:'Original PatternDocument mirrored panels → compileGarmentRuntime → XPBDClothSolver → renderer embedding',steps:240,maxAuthoringMs,outerBackEnvelope,initialFreeBackMax,elapsedMs:performance.now()-started,maxMovement,particles:mesh.particleCount,triangles:geometry.index!.count/3,seams,neckContinuity,neckPins:mesh.pinConstraints.length,collarArcs:Object.fromEntries(Object.entries(arcs).map(([id,arc])=>[id,{samples:arc.length,length:arc.at(-1)!.distance}])),document,limitations:['Neutral authoring drape, not runtime cloth or proven convergence','Neckline authoring pins follow actual torso collar; exported boundary shares interpolated collar rig/morphs but remains separate topology','Candidate requires back/front and body-extreme motion review']}}
     completed = true
     return result
   } finally {
     for (const geometry of temporaryGeometries) geometry.dispose()
     for (const material of temporaryMaterials) material.dispose()
     if (!completed) mergedGeometry?.dispose()
+    for (const {mesh,parent} of extraParents) {mesh.removeFromParent();parent?.add(mesh)}
     hoodie.removeFromParent();saved.parent?.add(hoodie);root.scale.copy(saved.scale);root.quaternion.copy(saved.quaternion);root.position.copy(saved.position);root.children[0].position.copy(saved.modelPosition);root.updateMatrixWorld(true);body.skeleton.update()}
 }

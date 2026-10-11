@@ -116,3 +116,35 @@ body-shape extremes, in all movement states and with each supported garment, and
 inspect actual creator/world captures. Do not run Three's `SimplifyModifier` on
 these meshes: it drops both morph and skin attributes. Mesh reduction needs a
 separate rig-preserving authoring pass and deformation checks.
+
+## Layered open jacket
+
+The normal exporter uses `authorLayeredJacketOutfit` after authoring the complete
+standalone hoodie and its sewn hood. It splits the original fitted front panel
+into two genuinely open fronts, preserves the eight original shoulder/sleeve/
+side seams, and deepens the free back neckline without moving its sewn endpoints.
+Four original authoring pins hold the shoulders on the actual inner hoodie while
+sewing; their relocated placement is included when refreshing seam rest lengths.
+No pins or cloth solver run in the game.
+
+Layer order is trousers → hoodie body → jacket → outside hood. The outside hood
+keeps the exact inner hoodie's collar positions, weights and corrective deltas;
+its initial free panels sit behind the measured outer jacket envelope. Garment
+layers use the upstream two-sided surface patches with swept contact, which
+prevents a step from tunnelling through a thin garment and choosing its inner
+side. Body/head collision remains the solid-mesh path.
+
+A jacket-only clone omits fully covered inner shoulder/sleeve triangles. The
+open chest and collar remain real hoodie geometry; the standalone hoodie retains
+its complete sleeves and separately authored hood. All jacket colour variants
+share this cream inner layer and outer hood without additional inventory charges.
+Their manifest bindings select the full outfit. The normal exporter preserves
+both standalone and layered hood geometries and separate authoring reports.
+
+The authoring run keeps 240 fixed steps and render embedding density 12. The more
+complex jacket and layered hood allow an explicit 60-second wall guard each;
+ordinary garments retain 20 seconds. Exceeding a guard fails export rather than
+accepting a partial simulation. A completed run is a frozen neutral-body drape,
+not a convergence claim or a separately simulated fit for every body shape.
+The reviewed candidate improves layering and hood visibility; strong sleeve folds
+and rough collar edges remain quality limitations requiring actual pose review.

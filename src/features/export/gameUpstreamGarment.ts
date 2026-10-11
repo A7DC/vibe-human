@@ -1,4 +1,6 @@
 import * as THREE from 'three/webgpu'
+import type { ClothSimMesh } from '../clothing/simulation/types'
+import type { PatternDocument } from '../clothing/document/types'
 import { bindSewnRenderSeams } from './exportSewnSeams'
 import { mergeGarmentPanels } from './mergeGarmentPanels'
 import { createDemoGarment, DEMO_GARMENT_PLACEMENTS } from '../clothing/demo/createDemoGarment'
@@ -11,8 +13,10 @@ import { solveCollisionConstraints } from '../clothing/simulation/collision/solv
 import { bindFittedGarment } from './exportGameGarments'
 
 /** An offline invocation of the original interactive garment authoring pipeline. */
-export async function authorUpstreamDemo(root: THREE.Object3D, body: THREE.SkinnedMesh, head: THREE.SkinnedMesh, options: { fitToTorso?: boolean; liftSleeves?: boolean; casualEase?: boolean; underLayers?: THREE.SkinnedMesh[]; renderSubdivisions?: number; variant?: 'tshirt' | 'hoodie' | 'jacket'; thinLayers?: boolean } = {}) {
+export async function authorUpstreamDemo(root: THREE.Object3D, body: THREE.SkinnedMesh, head: THREE.SkinnedMesh, options: { fitToTorso?: boolean; liftSleeves?: boolean; casualEase?: boolean; underLayers?: THREE.SkinnedMesh[]; renderSubdivisions?: number; variant?: 'tshirt' | 'hoodie' | 'jacket'; thinLayers?: boolean; maxAuthoringMs?: number; editPattern?: (document: PatternDocument) => PatternDocument; placeAuthoringPins?: (mesh: ClothSimMesh) => void } = {}) {
   const started = performance.now()
+  const maxAuthoringMs = options.maxAuthoringMs ?? 20000
+  if (!Number.isFinite(maxAuthoringMs) || maxAuthoringMs < 20000 || maxAuthoringMs > 60000) throw new Error('Authoring budget must be between 20 and 60 seconds')
   const saved = { scale: root.scale.clone(), quaternion: root.quaternion.clone(), position: root.position.clone(), modelPosition: root.children[0].position.clone() }
   const garment = createDemoGarment()
   const variant = options.variant ?? 'tshirt'
@@ -58,12 +62,18 @@ export async function authorUpstreamDemo(root: THREE.Object3D, body: THREE.Skinn
       placements[panel.id] = { position: { x: 0, y: nativeCentreY - 3.1, z: panel.id === 'torso-front' ? .34 : -.34 }, rotation: { x: 0, y: 0, z: 0 } }
     }
   }
-  const document = toPatternDocument(garment, placements)
+  const originalDocument = toPatternDocument(garment, placements)
+  const document = options.editPattern ? options.editPattern(originalDocument) : originalDocument
   const result = compileGarmentRuntime(document, { quality: 'high', seamSamples: 18, renderSubdivisions: options.renderSubdivisions ?? 30 })
   if (result.issues.some(issue => issue.severity === 'error')) throw new Error(JSON.stringify(result.issues))
   const runtime = result.value, mesh = runtime.simMesh
   const entries = runtime.renderPanels.map(createRenderPanelEntry)
   applyDocumentPlacements(mesh, document); refreshSeamPlacementRest(mesh)
+  if (options.placeAuthoringPins) {
+    options.placeAuthoringPins(mesh)
+    refreshSeamPlacementRest(mesh)
+    if (mesh.pinConstraints.some(pin => ![pin.x,pin.y,pin.z,pin.stiffness].every(Number.isFinite))) throw new Error('Authored garment pin target is not finite')
+  }
   const panelDamping = Object.values(document.panels).map(panel => panel.damping).filter((value): value is number => Number.isFinite(value))
   const damping = panelDamping.length ? panelDamping.reduce((sum, value) => sum + value, 0) / panelDamping.length : SOLVER_PRESETS.high.damping
   const solver = new XPBDClothSolver(mesh, { ...SOLVER_PRESETS.high, damping, ...(variant !== 'tshirt' ? { gravityDelayTime: SOLVER_PRESETS.high.sewingTime } : {}) })
@@ -105,7 +115,7 @@ export async function authorUpstreamDemo(root: THREE.Object3D, body: THREE.Skinn
     const seamGapMax = () => mesh.seamConstraints.reduce((maximum, seam) => Math.max(maximum, Math.hypot(...[0, 1, 2].map(c => mesh.positions[seam.a * 3 + c] - mesh.positions[seam.b * 3 + c]))), 0)
     let steps = 0, maxMovement = Infinity, stable = 0, reason = 'step-cap'
     for (; steps < 240; steps++) {
-      if (performance.now() - simulationStarted > 20000) throw new Error('Upstream authoring exceeded its 20-second budget before completing the fixed 240 steps')
+      if (performance.now() - simulationStarted > maxAuthoringMs) throw new Error(`Upstream authoring exceeded its ${maxAuthoringMs/1000}-second budget before completing the fixed 240 steps`)
       const previous = new Float32Array(mesh.positions)
       solver.step(snapshot); maxMovement = 0
       for (let i = 0; i < mesh.particleCount; i++) {
@@ -191,8 +201,8 @@ export async function authorUpstreamDemo(root: THREE.Object3D, body: THREE.Skinn
       placements: document.panels, compilerIssues: result.issues, particles: mesh.particleCount, simTriangles: mesh.triangles.length / 3, renderVertices: output.getAttribute('position').count, renderTriangles: output.index!.count / 3,
       constraints: { stretch: mesh.stretchConstraints.length, shear: mesh.shearConstraints.length, bendDistance: mesh.bendDistanceConstraints.length, bend: mesh.bendConstraints.length, seam: mesh.seamConstraints.length, pin: mesh.pinConstraints.length },
       originalPatternUnedited: !options.fitToTorso, editorOperations: options.fitToTorso ? ['Scale both original panels vertically to .98 native units', 'Place both panels at x0,z±.34,rotation0; derive centreY from edited bounds to anchor the highest neckline at native2.89', ...(options.liftSleeves ? ['Lift original sleeve-top points to shoulder height so assembly surrounds T-pose arms'] : []), ...(options.casualEase ? ['Extend original hem .20 native units; widen hem45%, underarm40%, shoulder10%; derive placement from edited bounds to preserve neckline at2.89'] : []), ...(variant !== 'tshirt' ? [`Extend original sleeve edges to native wrist x±1.43; cuff depth ${variant === 'hoodie' ? '.34' : '.31'}; torso edge ease ${variant === 'hoodie' ? '12%' : '8%'}`] : [])] : [], authoringBodyTranslation: [0, -3.1, 0], colliderBounds: collider.snapshot.bounds, usesBvh: !!collider.snapshot.bvh, bodyTriangles: collider.snapshot.indices.length / 3,
-      parameters: solver.params, steps, reason, maxMovement, seamGapMax: seamGapMax(), before, after: clearance(), history, elapsedMs: performance.now() - started,
-      limitations: ['Drape is frozen on the neutral body; supported body extremes use transferred rig correctives, not separate per-body simulations', `Original compiler renderer embedding uses ${options.renderSubdivisions ?? 30} subdivisions; simulation topology is unchanged`, 'Every exported candidate requires actual animation and supported body-extreme visual review', 'The bounded step snapshot does not claim physical convergence; exceeding the 20-second wall budget rejects export', 'Empty compiler constraint arrays are preserved exactly, not filled with substitute constraints'] }
+      parameters: solver.params, maxAuthoringMs, steps, reason, maxMovement, seamGapMax: seamGapMax(), before, after: clearance(), history, elapsedMs: performance.now() - started,
+      limitations: ['Drape is frozen on the neutral body; supported body extremes use transferred rig correctives, not separate per-body simulations', `Original compiler renderer embedding uses ${options.renderSubdivisions ?? 30} subdivisions; simulation topology is unchanged`, 'Every exported candidate requires actual animation and supported body-extreme visual review', `The bounded step snapshot does not claim physical convergence; exceeding the ${maxAuthoringMs/1000}-second wall budget rejects export`, 'Empty compiler constraint arrays are preserved exactly, not filled with substitute constraints'] }
   } finally {
     for (const { mesh: layer, parent } of layerParents) { layer.removeFromParent(); parent?.add(layer) }
     root.scale.copy(saved.scale); root.quaternion.copy(saved.quaternion); root.position.copy(saved.position); root.children[0].position.copy(saved.modelPosition); root.updateMatrixWorld(true); body.skeleton.update()

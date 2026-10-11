@@ -9,6 +9,7 @@ import { createAuthoredGarmentFabric } from './gameGarmentMaterials'
 import { authorUpstreamTrousers, createGameTrouserDocument } from './gameUpstreamTrousers'
 import { createAuthoredTrouserFabric } from './gameTrouserMaterials'
 import { authorUpstreamHood } from './gameUpstreamHood'
+import { authorLayeredJacketOutfit } from './gameUpstreamJacket'
 
 async function build() {
   const base = import.meta.env.BASE_URL
@@ -34,7 +35,7 @@ async function build() {
     const material = mesh.material as import('three/webgpu').MeshStandardMaterial
     material.map = trouserFabric; material.vertexColors = false
   }
-  for (const variant of ['tshirt', 'hoodie', 'jacket'] as const) {
+  for (const variant of ['tshirt', 'hoodie'] as const) {
     const authored = await authorUpstreamDemo(prepared.root, prepared.body, prepared.head, {
       fitToTorso: true, liftSleeves: true, casualEase: true, variant,
       underLayers: clothing.garments.filter(mesh => mesh.name === 'starter-trousers'),
@@ -45,8 +46,7 @@ async function build() {
     if (variant !== 'tshirt') {
       for (const colour of ['navy', 'cream', 'wine']) {
         const id = `${variant}-${colour}`
-        // Closed jackets have no intersecting inner tee or floating lapels.
-        // The hood is authored against this final torso below.
+        // Standalone hood is authored against this final torso below.
         clothing.manifestGarments[id].meshes = variant === 'hoodie' ? [id, `${id}-folded-hood`] : [id]
       }
       clothing.garments = clothing.garments.filter(mesh => {
@@ -71,6 +71,9 @@ async function build() {
     replaced.add(mesh.geometry); mesh.geometry = hood.geometry
     mesh.userData.garmentAuthoring = { source: 'New two-panel PatternDocument through upstream sewing solver, attached to authored torso collar', runtimeCloth: false }
   }
+  // Inner hoodie → open jacket → outside hood; standalone hood above remains intact.
+  const layered=await authorLayeredJacketOutfit(prepared.root,prepared.body,prepared.head,clothing,replaced)
+  reports.jacket=layered.jacket;reports.jacketHood=layered.jacketHood
   for (const geometry of replaced) geometry.dispose()
   prepared.body.parent!.add(...clothing.bodyRegions, ...clothing.garments)
   prepared.body.removeFromParent()
@@ -91,7 +94,7 @@ async function build() {
     animations: Object.fromEntries(animations.map(clip => [clip.name, clip.name])),
   }
   const garmentTriangles = clothing.garments.reduce((sum, mesh) => sum + (mesh.geometry.index?.count ?? mesh.geometry.getAttribute('position').count) / 3, 0)
-  const result = { binary: Array.from(new Uint8Array(binary)), manifest, authoringReport: { ...reports.tshirt, additionalGarments: { hoodie: reports.hoodie, jacket: reports.jacket, trousers: reports.trousers, hood: reports.hood } }, metrics: { ...prepared.metrics, ...clothing.stats, garmentTriangles, groom: groom.stats, bytes: binary.byteLength } }
+  const result = { binary: Array.from(new Uint8Array(binary)), manifest, authoringReport: { ...reports.tshirt, additionalGarments: { hoodie: reports.hoodie, jacket: reports.jacket, trousers: reports.trousers, hood: reports.hood, jacketHood: reports.jacketHood } }, metrics: { ...prepared.metrics, ...clothing.stats, garmentTriangles, groom: groom.stats, bytes: binary.byteLength } }
   Object.assign(window, { gameExport: result })
   document.querySelector('#status')!.textContent = JSON.stringify(result.metrics)
   for (const [label, filename, blob] of [
