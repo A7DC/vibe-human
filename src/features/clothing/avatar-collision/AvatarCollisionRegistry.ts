@@ -334,6 +334,8 @@ export function buildAvatarMeshColliderSnapshotFromSkinnedMeshes(
     vertices: vertexArray,
     indices: indexArray,
     triangleNormals: hash.triangleNormals,
+    triangleCentroids: hash.triangleCentroids,
+    triangleRadii: hash.triangleRadii,
     cellSize: hash.cellSize,
     cellKeys: hash.cellKeys,
     cellStarts: hash.cellStarts,
@@ -1102,6 +1104,8 @@ function buildTriangleSpatialHash(vertices: Float32Array, indices: Uint32Array, 
   const cells = new Map<number, number[]>()
   const triangleCount = indices.length / 3
   const triangleNormals = new Float32Array(triangleCount * 3)
+  const triangleCentroids = new Float32Array(triangleCount * 3)
+  const triangleRadii = new Float32Array(triangleCount)
   let minX = Infinity
   let minY = Infinity
   let minZ = Infinity
@@ -1139,6 +1143,12 @@ function buildTriangleSpatialHash(vertices: Float32Array, indices: Uint32Array, 
     const nz = abx * acy - aby * acx
     const normalLength = Math.hypot(nx, ny, nz)
     const normalOffset = triangle * 3
+    // Hashed grid cells can alias at distant, mirrored coordinates. Supply
+    // the existing solver's geometric broad-phase rejection, as the cached
+    // animated collider path already does, before signed surface projection.
+    const mx = (ax + bx + cx) / 3, my = (ay + by + cy) / 3, mz = (az + bz + cz) / 3
+    triangleCentroids[normalOffset] = mx; triangleCentroids[normalOffset + 1] = my; triangleCentroids[normalOffset + 2] = mz
+    triangleRadii[triangle] = Math.max(Math.hypot(ax - mx, ay - my, az - mz), Math.hypot(bx - mx, by - my, bz - mz), Math.hypot(cx - mx, cy - my, cz - mz))
     if (normalLength > 1e-9) {
       const invNormalLength = 1 / normalLength
       triangleNormals[normalOffset] = nx * invNormalLength
@@ -1201,6 +1211,8 @@ function buildTriangleSpatialHash(vertices: Float32Array, indices: Uint32Array, 
   return {
     cellSize: safeCellSize,
     triangleNormals,
+    triangleCentroids,
+    triangleRadii,
     cellKeys,
     cellStarts,
     cellCounts,
