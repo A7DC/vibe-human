@@ -15,8 +15,11 @@ Open **http://127.0.0.1:5190/vibe-human/game-export.html**. This is a developmen
 the Draco decoder is served from `node_modules/three/examples/jsm/libs/draco/gltf/`.
 The page shows export metrics and **Download character** / **Download manifest** links when finished. It exposes the result as
 `window.gameExport` (`binary`, `manifest`, `metrics`), or an error as
-`window.gameExportError`. It does not run cloth simulation or require opening the
-React character authoring UI.
+`window.gameExportError`. T-shirts now run through the original clothing compiler,
+sewing solver and render embedding during this offline authoring step. It does not
+require opening the React character authoring UI. No cloth simulation runs in the
+game. The result also exposes `authoringReport`, including seam gaps, remaining
+movement and collision diagnostics; a step limit is not a convergence claim.
 
 To save the result from the browser console:
 
@@ -56,13 +59,24 @@ Actual source assets are `public/human5.glb`,
 `public/textures/eyes.png`. The source human contains a 164-joint skeleton, separate
 body/head primitives and bone-attached eyes. It has no embedded animation clips.
 Hair variants use the existing scalp-guide, strand-generation and hair-card
-helpers. Starter garments and catalog variants are fitted offline from the native
-body, with T-shirt proportions informed by the upstream demo pattern; they are
-new export authoring geometry, not previously supplied finished garment assets.
+helpers. Starter and purchasable T-shirts use the upstream demo pattern with
+editor-level sizing and placement adjustments, followed by the original
+`compileGarmentRuntime`, `XPBDClothSolver` and `useGarmentSimulation` render
+embedding helpers. The resulting drape receives skeleton weights and corrective
+targets before export. Other garments still use the earlier fitted adaptations;
+they have not all been migrated to this draping workflow.
 Locomotion clips are newly authored against the source rig.
 
 ## Helper contracts
 
+- `authorUpstreamDemo(root, body, head, options)` runs the original panel compiler,
+  sewing solver and render embedding offline. The game entry uses the sized demo
+  panels and actual trousers as an authoring collision layer, then transfers rig
+  weights and relative body correctives through the original render embedding.
+  Sewn panel boundaries retain common positions, weights and corrective deltas.
+  The inspection entry `game-upstream-garment.html` supports candidate fitting;
+  `game-export.html` is the installation entry. A candidate is not automatically
+  accepted for the game merely because export succeeds.
 - `prepareGameCharacter(rawGLTF.scene, options)` clones the rig and geometry,
   restores its neutral pose, retains supported mass/jaw morphs and returns
   `{ root, body, head, controls, metrics }`. `body` and `head` remain in native

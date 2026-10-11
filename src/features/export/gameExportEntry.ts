@@ -4,6 +4,7 @@ import { prepareGameCharacter, exportGameCharacter } from './exportGameCharacter
 import { buildGameCatalogGarments } from './exportGameGarments'
 import { buildGameGroom } from './gameGroom'
 import { createGameAnimations } from './gameAnimations'
+import { authorUpstreamDemo } from './gameUpstreamGarment'
 
 async function build() {
   const base = import.meta.env.BASE_URL
@@ -11,6 +12,20 @@ async function build() {
   const source = await new GLTFLoader().setDRACOLoader(decoder).loadAsync(`${base}human5.glb`)
   const prepared = await prepareGameCharacter(source.scene, { textureBaseUrl: base })
   const clothing = buildGameCatalogGarments(prepared.body, prepared.head)
+  // Author with the original pattern compiler, sewing solver and renderer.
+  // Only the resulting rigged mesh is exported; simulation stays offline.
+  const shirt = await authorUpstreamDemo(prepared.root, prepared.body, prepared.head, {
+    fitToTorso: true, liftSleeves: true, casualEase: true,
+    underLayers: clothing.garments.filter(mesh => mesh.name === 'starter-trousers'),
+    renderSubdivisions: 12,
+  })
+  const replaced = new Set<import('three/webgpu').BufferGeometry>()
+  for (const mesh of clothing.garments) if (mesh.name === 'starter-tee' || mesh.name.startsWith('tshirt-')) {
+    replaced.add(mesh.geometry)
+    mesh.geometry = shirt.geometry
+    ;(mesh.material as import('three/webgpu').MeshStandardMaterial).vertexColors = false
+  }
+  for (const geometry of replaced) geometry.dispose()
   prepared.body.parent!.add(...clothing.bodyRegions, ...clothing.garments)
   prepared.body.removeFromParent()
   prepared.controls.build.mesh = 'body-exposed'
@@ -29,7 +44,8 @@ async function build() {
     garments: clothing.manifestGarments,
     animations: Object.fromEntries(animations.map(clip => [clip.name, clip.name])),
   }
-  const result = { binary: Array.from(new Uint8Array(binary)), manifest, metrics: { ...prepared.metrics, ...clothing.stats, groom: groom.stats, bytes: binary.byteLength } }
+  const garmentTriangles = clothing.garments.reduce((sum, mesh) => sum + (mesh.geometry.index?.count ?? mesh.geometry.getAttribute('position').count) / 3, 0)
+  const result = { binary: Array.from(new Uint8Array(binary)), manifest, authoringReport: shirt.report, metrics: { ...prepared.metrics, ...clothing.stats, garmentTriangles, groom: groom.stats, bytes: binary.byteLength } }
   Object.assign(window, { gameExport: result })
   document.querySelector('#status')!.textContent = JSON.stringify(result.metrics)
   for (const [label, filename, blob] of [
